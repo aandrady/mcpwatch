@@ -16,7 +16,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now \
     mcpwatch-registry-incremental.timer \
     mcpwatch-registry-full.timer \
-    mcpwatch-manifest.timer
+    mcpwatch-manifest.timer \
+    mcpwatch-health.timer
 
 echo
 echo "Installed. Next runs:"
