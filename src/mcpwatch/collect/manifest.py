@@ -36,6 +36,7 @@ import ssl
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -244,9 +245,17 @@ class ManifestProber:
         )
 
     async def _run_pass(
-        self, targets: list[Target], *, keep_documents: bool
+        self,
+        targets: list[Target],
+        *,
+        keep_documents: bool,
+        on_complete: Callable[[Target, ProbeOutcome], None] | None = None,
     ) -> dict[str, ProbeOutcome]:
-        """Probe every target once, bounded globally and serialized per host."""
+        """Probe every target once, bounded globally and serialized per host.
+
+        ``on_complete`` fires as each probe lands, which is what lets pass B
+        commit observations incrementally instead of at the end.
+        """
         semaphore = asyncio.Semaphore(self.concurrency)
         host_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         results: dict[str, ProbeOutcome] = {}
@@ -263,13 +272,16 @@ class ManifestProber:
 
             async def one(target: Target) -> None:
                 async with semaphore, host_locks[target.host]:
-                    results[target.server_key] = await self._probe(
-                        client, target, keep_document=keep_documents
-                    )
+                    outcome = await self._probe(client, target, keep_document=keep_documents)
+                    results[target.server_key] = outcome
                     if self.per_host_delay:
                         # Held inside the host lock on purpose: a platform with
                         # hundreds of listed servers gets paced, not hammered.
                         await asyncio.sleep(self.per_host_delay)
+                # Outside the locks: the write is brief and blocking, and there
+                # is no reason to hold a host's slot while it happens.
+                if on_complete is not None:
+                    on_complete(target, outcome)
 
             await asyncio.gather(*(one(t) for t in targets))
         return results
@@ -299,12 +311,16 @@ class ManifestProber:
         first = await self._run_pass(targets, keep_documents=False)
         stats.pass_a_seconds = round(time.monotonic() - mark, 3)
 
-        mark = time.monotonic()
-        second = await self._run_pass(targets, keep_documents=True)
-        stats.pass_b_seconds = round(time.monotonic() - mark, 3)
+        # Commit each observation the moment its second probe lands, rather than
+        # batching at the end. A cycle that dies halfway then keeps everything it
+        # had already collected; batching would throw the whole day away, and
+        # Layer-2 days cannot be re-collected.
+        def commit(target: Target, outcome: ProbeOutcome) -> None:
+            self._record(target, first[target.server_key], outcome, run_id, stats)
 
-        for target in targets:
-            self._record(target, first[target.server_key], second[target.server_key], run_id, stats)
+        mark = time.monotonic()
+        await self._run_pass(targets, keep_documents=True, on_complete=commit)
+        stats.pass_b_seconds = round(time.monotonic() - mark, 3)
 
         stats.wall_seconds = round(time.monotonic() - started, 3)
         self.corpus.finish_run(run_id, stats=stats.as_json())

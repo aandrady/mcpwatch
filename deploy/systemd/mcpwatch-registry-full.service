@@ -1,0 +1,19 @@
+[Unit]
+Description=MCPWatch Layer-1 registry collector (full reconciliation)
+Documentation=https://github.com/L-Logix/mcpwatch
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+Environment=MCPWATCH_CONTACT=mcpwatch@iyre.com
+# Only a full crawl can observe absence, so this is what records servers that
+# disappeared from the registry. The incremental path cannot see them.
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.collect.registry --mode full
+
+CPUQuota=100%
+MemoryMax=1G
+Nice=10
+TimeoutStartSec=3600

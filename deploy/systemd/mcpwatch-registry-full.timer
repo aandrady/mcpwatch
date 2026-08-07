@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly MCPWatch registry full reconciliation
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

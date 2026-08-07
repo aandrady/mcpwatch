@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily MCPWatch registry delta
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+# A missed run (reboot, box down) fires on next boot rather than being skipped.
+# The corpus is a time series; a silent hole in it is the worst outcome.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
