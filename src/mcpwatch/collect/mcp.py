@@ -116,9 +116,22 @@ def parse_jsonrpc(content_type: str, body: str, request_id: str) -> dict[str, An
     for message in candidates:
         if isinstance(message, dict) and str(message.get("id")) == request_id:
             return message
-    # Some servers answer with a single unlabelled response object.
-    if len(candidates) == 1 and isinstance(candidates[0], dict) and "id" not in candidates[0]:
-        return candidates[0]
+
+    # Fall back when exactly one response came back. JSON-RPC says the id must
+    # be echoed, but plenty of servers in the wild return `"id": 0`, a
+    # re-numbered id, or no id at all. We sent one request down this connection,
+    # so a lone response carrying a result or an error is unambiguously its
+    # answer, and rejecting it would discard a perfectly good manifest over a
+    # spec technicality. Strict matching still applies whenever the server sent
+    # more than one message, where guessing would be a real risk.
+    replies = [
+        message
+        for message in candidates
+        if isinstance(message, dict) and ("result" in message or "error" in message)
+    ]
+    if len(replies) == 1:
+        return replies[0]
+
     msg = f"no JSON-RPC message with id {request_id!r} in response ({content_type})"
     raise McpProtocolError(msg)
 

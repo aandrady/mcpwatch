@@ -65,12 +65,42 @@ class TestFraming:
         body = json.dumps({"jsonrpc": "2.0", "result": {"lenient": True}})
         assert parse_jsonrpc("application/json", body, "abc")["result"] == {"lenient": True}
 
+    def test_a_single_response_with_the_wrong_id_is_still_accepted(self):
+        """Observed live: several servers echo `"id": 0` instead of ours.
+
+        Non-compliant, but the manifest is perfectly good and we sent exactly
+        one request, so the lone reply is unambiguously its answer.
+        """
+        body = json.dumps({"jsonrpc": "2.0", "id": 0, "result": {"tools": TOOLS}})
+        assert parse_jsonrpc("application/json", body, "abc")["result"]["tools"] == TOOLS
+
+    def test_the_fallback_does_not_apply_when_several_replies_came_back(self):
+        """With more than one reply, guessing would be a real risk."""
+        body = sse(
+            {"jsonrpc": "2.0", "id": 0, "result": {"first": True}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"second": True}},
+        )
+        with pytest.raises(McpProtocolError, match="no JSON-RPC message"):
+            parse_jsonrpc("text/event-stream", body, "abc")
+
+    def test_notifications_do_not_count_as_replies(self):
+        """A progress notification alongside one reply must not block it."""
+        body = sse(
+            {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}},
+            {"jsonrpc": "2.0", "id": 0, "result": {"ok": True}},
+        )
+        assert parse_jsonrpc("text/event-stream", body, "abc")["result"] == {"ok": True}
+
     def test_non_json_body_raises(self):
         with pytest.raises(McpProtocolError, match="not JSON"):
             parse_jsonrpc("text/html", "<html>nope</html>", "abc")
 
-    def test_missing_id_among_many_raises(self):
-        body = sse({"jsonrpc": "2.0", "id": "x", "result": {}}, {"jsonrpc": "2.0", "id": "y"})
+    def test_a_stream_carrying_no_reply_at_all_raises(self):
+        """Notifications only, and nothing that answers the request."""
+        body = sse(
+            {"jsonrpc": "2.0", "method": "notifications/message", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/progress", "params": {}},
+        )
         with pytest.raises(McpProtocolError, match="no JSON-RPC message"):
             parse_jsonrpc("text/event-stream", body, "abc")
 
