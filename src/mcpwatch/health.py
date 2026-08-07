@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
-from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, from_iso, utcnow
+from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, from_iso, to_iso, utcnow
 
 __all__ = ["Check", "HealthReport", "check_corpus", "main"]
 
@@ -41,6 +41,15 @@ the crawler broke, not that the ecosystem did.
 
 MAX_NONDETERMINISTIC_RATIO = 0.10
 """Above this, suspect our own normalization before blaming the servers."""
+
+STALE_RUN_WINDOW = timedelta(days=7)
+"""How far back to look for cycles that died mid-run.
+
+Bounded on purpose. Abandoned runs are never closed — closing one would claim it
+finished when it did not — so an unbounded query would keep reporting the same
+historical debris forever, and an alarm that never clears is an alarm nobody
+reads. Freshness is what catches a collector that has stopped for good.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,16 +130,26 @@ def check_corpus(corpus: Corpus) -> HealthReport:
         if isinstance(seen, int):
             report.add(f"{collector}.volume", seen > 0, f"{seen} servers in the last run")
 
-    # A run left open is how a collector says it died mid-cycle. One that is
-    # still running is normal, so only flag runs older than any plausible cycle.
+    # A run left open is how a collector says it died mid-cycle. Two bounds, not
+    # one: a run younger than 12h may simply still be going, and a run older than
+    # the window is historical debris. An abandoned run is never closed — doing
+    # so would falsify the record — so without an upper bound one dead cycle
+    # would red-line this check forever, and a check that is always red is a
+    # check nobody reads.
     stale_open = corpus.index.connection.execute(
-        "SELECT count(*) AS n FROM run WHERE finished_at IS NULL AND started_at < ?",
-        ((now - timedelta(hours=12)).isoformat(timespec="microseconds"),),
+        """
+        SELECT count(*) AS n FROM run
+        WHERE finished_at IS NULL AND started_at < ? AND started_at >= ?
+        """,
+        (
+            to_iso(now - timedelta(hours=12)),
+            to_iso(now - STALE_RUN_WINDOW),
+        ),
     ).fetchone()["n"]
     report.add(
         "runs.no_stale_open",
         stale_open == 0,
-        f"{stale_open} run(s) started >12h ago and never finished",
+        f"{stale_open} run(s) died mid-cycle in the last {STALE_RUN_WINDOW.days} days",
     )
 
     _check_coverage(corpus, report)
