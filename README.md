@@ -188,6 +188,25 @@ An **unfinished run** (`finished_at IS NULL`) is the signal that a cycle died. C
 deliberately never auto-close a crashed run, because that would make a broken collector look
 healthy.
 
+### Health checks
+
+```bash
+uv run python -m mcpwatch.health
+```
+
+Scheduling without detection is how a collector fails silently for two weeks. This runs daily at
+06:00 UTC and checks freshness per collector, crashed runs, registry coverage against the
+previous *full* crawl, the nondeterministic quarantine rate, and that every referenced blob is
+present. Everything is derived from the corpus itself, so the checks stay true even if a
+collector died before it could report anything.
+
+A failure exits non-zero, which leaves the systemd unit failed — no mail transport or external
+alerting service needed:
+
+```bash
+systemctl --user list-units --failed
+```
+
 ## Development
 
 ```bash
