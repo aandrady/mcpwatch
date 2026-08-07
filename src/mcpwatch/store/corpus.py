@@ -227,6 +227,8 @@ class Corpus:
         raw_bytes: bytes | None = None,
         observed_at: datetime | None = None,
         status: ObservationStatus = ObservationStatus.OK,
+        error_class: str | None = None,
+        error_detail: str | None = None,
     ) -> SnapshotWrite:
         """Store a snapshot's raw and canonical blobs and append an observation.
 
@@ -243,6 +245,10 @@ class Corpus:
             status: Normally ``OK``. ``NONDETERMINISTIC`` is the other legitimate
                 value — WP3's double probe still stores the manifest it got, it
                 just quarantines it from mutation statistics.
+            error_class: Optional annotation on an otherwise successful
+                observation, e.g. WP3 recording that only one of its two probes
+                came back so determinism could not be verified.
+            error_detail: Free-text companion to ``error_class``.
 
         Returns:
             A :class:`SnapshotWrite` reporting the bytes actually written and
@@ -272,6 +278,8 @@ class Corpus:
                 raw_sha=raw_write.digest,
                 norm_sha=norm_write.digest,
                 norm_version=self.policy.version,
+                error_class=error_class,
+                error_detail=error_detail,
             )
             self.index.touch_server(server_key, seen_at=moment)
             observation = self.index.get_observation(obs_id)
