@@ -6,9 +6,13 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [{ name = "MCPWatch" }]
-# The storage layer is deliberately stdlib-only: sqlite3, hashlib, gzip, json.
-# Collectors (WP2/WP3) may add HTTP dependencies; the corpus must never depend on them.
-dependencies = []
+# The storage layer is deliberately stdlib-only: sqlite3, hashlib, gzip, json, and
+# WP2's registry crawl is a sequential cursor walk over urllib. httpx is here for
+# WP3 alone, which probes ~10k hosts concurrently and needs a real async client.
+# `mcpwatch.store` imports none of it; the corpus must never depend on a collector.
+dependencies = [
+    "httpx>=0.27",
+]
 
 [dependency-groups]
 dev = [
