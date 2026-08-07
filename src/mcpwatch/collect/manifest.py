@@ -23,8 +23,9 @@ Safety properties, by construction rather than by discipline:
 * No credentials are ever sent. A server demanding auth is recorded
   ``auth_required`` and skipped; that population is a reported coverage
   limitation of the dataset.
-* Concurrency is globally capped and strictly serialized per host, so a platform
-  hosting hundreds of servers sees one connection at a time, not hundreds.
+* Concurrency is capped globally and again per host, so a platform hosting
+  hundreds of listed servers sees a handful of connections, never a fan-out
+  proportional to how many servers it publishes.
 * Failed probes are never retried within a pass. The second pass is the retry.
 """
 
@@ -36,6 +37,7 @@ import ssl
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -57,7 +59,23 @@ COLLECTOR_VERSION = "0.1.0"
 DEFAULT_CONCURRENCY = 50
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_PER_HOST_DELAY = 0.5
-"""Pause after finishing with a host, while still holding its lock."""
+"""Pause after finishing with a host, while still holding its slot."""
+
+DEFAULT_PER_HOST_CONCURRENCY = 4
+"""Simultaneous probes allowed against any single host.
+
+Endpoints are not evenly spread across hosts: in the day-zero census one gateway
+alone accounted for 1,311 of 10,373 targets (12.6%), and the top six hosts for
+1,797 between them. Serializing a host completely — the obvious reading of
+"strict per-host serialization" — makes the whole cycle's wall-time hostage to
+its most crowded host, and turns a bad day there into a runaway: 1,311 probes
+timing out at 20s each is over seven hours for that host alone, per pass.
+
+A small semaphore keeps the politeness property that matters (a host never sees
+an unbounded fan-out from us) while bounding the tail. Four concurrent read-only
+requests is negligible for a platform that publishes a thousand servers, and any
+host with a handful of servers is still effectively serialized.
+"""
 
 
 @dataclass
@@ -78,6 +96,8 @@ class ManifestStats:
     pass_a_seconds: float = 0.0
     pass_b_seconds: float = 0.0
     concurrency: int = DEFAULT_CONCURRENCY
+    per_host_concurrency: int = DEFAULT_PER_HOST_CONCURRENCY
+    busiest_host_targets: int = 0
     truncated: bool = False
     status_counts: dict[str, int] = field(default_factory=dict)
     errors_by_class: dict[str, int] = field(default_factory=dict)
@@ -180,6 +200,7 @@ class ManifestProber:
         concurrency: int = DEFAULT_CONCURRENCY,
         timeout: float = DEFAULT_TIMEOUT,
         per_host_delay: float = DEFAULT_PER_HOST_DELAY,
+        per_host_concurrency: int = DEFAULT_PER_HOST_CONCURRENCY,
         session_factory: SessionFactory | None = None,
     ) -> None:
         """Configure a prober.
@@ -190,6 +211,7 @@ class ManifestProber:
             concurrency: Global cap on simultaneous probes.
             timeout: Per-request timeout in seconds.
             per_host_delay: Pause held against a host after finishing with it.
+            per_host_concurrency: Simultaneous probes allowed per host.
             session_factory: Override the MCP session class, for tests.
         """
         self.corpus = corpus
@@ -197,6 +219,7 @@ class ManifestProber:
         self.concurrency = concurrency
         self.timeout = timeout
         self.per_host_delay = per_host_delay
+        self.per_host_concurrency = max(1, per_host_concurrency)
         self._session_factory = session_factory or McpSession
 
     # -------------------------------------------------------------- targets ---
@@ -244,11 +267,21 @@ class ManifestProber:
         )
 
     async def _run_pass(
-        self, targets: list[Target], *, keep_documents: bool
+        self,
+        targets: list[Target],
+        *,
+        keep_documents: bool,
+        on_complete: Callable[[Target, ProbeOutcome], None] | None = None,
     ) -> dict[str, ProbeOutcome]:
-        """Probe every target once, bounded globally and serialized per host."""
+        """Probe every target once, bounded globally and serialized per host.
+
+        ``on_complete`` fires as each probe lands, which is what lets pass B
+        commit observations incrementally instead of at the end.
+        """
         semaphore = asyncio.Semaphore(self.concurrency)
-        host_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        host_slots: dict[str, asyncio.Semaphore] = defaultdict(
+            lambda: asyncio.Semaphore(self.per_host_concurrency)
+        )
         results: dict[str, ProbeOutcome] = {}
 
         limits = httpx.Limits(
@@ -262,14 +295,17 @@ class ManifestProber:
         ) as client:
 
             async def one(target: Target) -> None:
-                async with semaphore, host_locks[target.host]:
-                    results[target.server_key] = await self._probe(
-                        client, target, keep_document=keep_documents
-                    )
+                async with semaphore, host_slots[target.host]:
+                    outcome = await self._probe(client, target, keep_document=keep_documents)
+                    results[target.server_key] = outcome
                     if self.per_host_delay:
-                        # Held inside the host lock on purpose: a platform with
+                        # Held inside the host's slot on purpose: a platform with
                         # hundreds of listed servers gets paced, not hammered.
                         await asyncio.sleep(self.per_host_delay)
+                # Outside both semaphores: the write is brief and blocking, and
+                # there is no reason to hold a host's slot while it happens.
+                if on_complete is not None:
+                    on_complete(target, outcome)
 
             await asyncio.gather(*(one(t) for t in targets))
         return results
@@ -285,7 +321,15 @@ class ManifestProber:
         started = time.monotonic()
         targets = self.targets(limit)
         stats = ManifestStats(targets=len(targets), concurrency=self.concurrency)
+        stats.per_host_concurrency = self.per_host_concurrency
         stats.truncated = limit is not None
+        host_counts: dict[str, int] = defaultdict(int)
+        for target in targets:
+            host_counts[target.host] += 1
+        # Cycle wall-time is dominated by the busiest host, so track it as a
+        # health metric: if it climbs, the cycle is one bad day away from
+        # running long, and a Layer-2 cycle that overruns eats the next one.
+        stats.busiest_host_targets = max(host_counts.values(), default=0)
         if not targets:
             msg = (
                 "no probe targets; run the registry collector first so servers "
@@ -299,12 +343,16 @@ class ManifestProber:
         first = await self._run_pass(targets, keep_documents=False)
         stats.pass_a_seconds = round(time.monotonic() - mark, 3)
 
-        mark = time.monotonic()
-        second = await self._run_pass(targets, keep_documents=True)
-        stats.pass_b_seconds = round(time.monotonic() - mark, 3)
+        # Commit each observation the moment its second probe lands, rather than
+        # batching at the end. A cycle that dies halfway then keeps everything it
+        # had already collected; batching would throw the whole day away, and
+        # Layer-2 days cannot be re-collected.
+        def commit(target: Target, outcome: ProbeOutcome) -> None:
+            self._record(target, first[target.server_key], outcome, run_id, stats)
 
-        for target in targets:
-            self._record(target, first[target.server_key], second[target.server_key], run_id, stats)
+        mark = time.monotonic()
+        await self._run_pass(targets, keep_documents=True, on_complete=commit)
+        stats.pass_b_seconds = round(time.monotonic() - mark, 3)
 
         stats.wall_seconds = round(time.monotonic() - started, 3)
         self.corpus.finish_run(run_id, stats=stats.as_json())
@@ -407,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--per-host-delay", type=float, default=DEFAULT_PER_HOST_DELAY)
+    parser.add_argument("--per-host-concurrency", type=int, default=DEFAULT_PER_HOST_CONCURRENCY)
     parser.add_argument("--contact", default=os.environ.get("MCPWATCH_CONTACT", DEFAULT_CONTACT))
     args = parser.parse_args(argv)
 
@@ -417,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
             concurrency=args.concurrency,
             timeout=args.timeout,
             per_host_delay=args.per_host_delay,
+            per_host_concurrency=args.per_host_concurrency,
         )
         try:
             stats = prober.crawl(limit=args.limit)

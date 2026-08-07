@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily MCPWatch live manifest probe
+
+[Timer]
+# Staggered 30 minutes after the registry delta so the target list is fresh.
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

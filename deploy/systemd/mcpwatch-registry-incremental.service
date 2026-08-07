@@ -1,0 +1,19 @@
+[Unit]
+Description=MCPWatch Layer-1 registry collector (incremental)
+Documentation=https://github.com/L-Logix/mcpwatch
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+Environment=MCPWATCH_CONTACT=mcpwatch@iyre.com
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.collect.registry --mode incremental
+
+# The box is shared with other agent workloads. A runaway crawl must degrade
+# itself, not its co-tenants.
+CPUQuota=100%
+MemoryMax=1G
+Nice=10
+TimeoutStartSec=1800

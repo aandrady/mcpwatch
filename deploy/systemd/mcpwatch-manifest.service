@@ -1,0 +1,28 @@
+[Unit]
+Description=MCPWatch Layer-2 live manifest prober
+Documentation=https://github.com/L-Logix/mcpwatch
+After=network-online.target
+# Ordering only, not a dependency: if the registry run fails, the manifest probe
+# must still go ahead against yesterday's target list. Layer-2 data cannot be
+# backfilled, so a missed probe is permanent — whereas a stale target list costs
+# at most one day of newly-published servers.
+After=mcpwatch-registry-incremental.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+Environment=MCPWATCH_CONTACT=mcpwatch@iyre.com
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.collect.manifest --concurrency 50
+
+# A full double-probe cycle measured ~20 min. The timeout is deliberately far
+# above that: killing a cycle midway loses that day's Layer-2 data for every
+# server not yet reached, and that loss is permanent.
+TimeoutStartSec=14400
+CPUQuota=200%
+MemoryMax=2G
+Nice=10
+
+[Install]
+WantedBy=default.target
