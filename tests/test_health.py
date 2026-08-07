@@ -167,3 +167,23 @@ class TestCli:
         payload = json.loads(capsys.readouterr().out)
         assert payload["ok"] is True
         assert any(c["name"] == "registry.freshness" for c in payload["checks"])
+
+
+class TestStaleRunWindow:
+    def test_ancient_debris_does_not_red_line_the_check_forever(self, corpus):
+        """An abandoned run is never closed, so the query must be bounded."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        corpus.start_run("manifest", "0.1.0", started_at=utcnow() - timedelta(days=30))
+
+        report = check_corpus(corpus)
+
+        assert report.ok
+        assert named(report, "runs.no_stale_open").detail.startswith("0 run")
+
+    def test_a_recent_death_is_still_caught(self, corpus):
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        corpus.start_run("manifest", "0.1.0", started_at=utcnow() - timedelta(days=2))
+
+        assert not check_corpus(corpus).ok
