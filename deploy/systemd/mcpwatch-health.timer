@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily MCPWatch corpus health check
+
+[Timer]
+# An hour after the manifest probe is scheduled to finish, so a cycle that ran
+# long is still visible as a stale open run rather than racing the check.
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

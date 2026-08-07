@@ -1,0 +1,19 @@
+[Unit]
+Description=MCPWatch corpus health check
+Documentation=https://github.com/L-Logix/mcpwatch
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.health
+
+# A non-zero exit leaves this unit in a failed state, which surfaces in
+# `systemctl --user list-units --failed` without needing a mail transport or an
+# external alerting service. Detection matters more than automation here: a
+# collector that dies quietly is the worst realistic outcome for this project.
+TimeoutStartSec=600
+Nice=15
+
+# No [Install]: activated by its timer only.
