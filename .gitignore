@@ -1,0 +1,26 @@
+# The corpus NEVER goes in git. It lives at ~/mcpwatch-corpus on the VPS,
+# deliberately outside the work tree so no git operation can touch it.
+corpus/
+*.db
+*.db-wal
+*.db-shm
+blobs/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Scratch
+scratch/
+*.tmp
+.DS_Store
