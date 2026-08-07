@@ -246,9 +246,9 @@ class TestTargets:
 
 
 class TestConcurrency:
-    def test_one_host_is_never_probed_concurrently(self, corpus):
-        """A platform listing hundreds of servers must see one connection."""
-        shared = [(f"s{n}", f"https://shared.example/mcp/{n}") for n in range(6)]
+    def test_one_host_never_sees_more_than_its_slot_allowance(self, corpus):
+        """A platform listing hundreds of servers sees a handful, not hundreds."""
+        shared = [(f"s{n}", f"https://shared.example/mcp/{n}") for n in range(12)]
         seed(corpus, *shared)
 
         live = 0
@@ -263,8 +263,40 @@ class TestConcurrency:
                 live -= 1
                 return manifest_doc()
 
-        # All six share a netloc, so the per-host lock must serialize them.
-        ManifestProber(corpus, session_factory=Tracking, concurrency=6, per_host_delay=0.0).crawl()
+        # All twelve share a netloc, so the per-host semaphore caps them at its
+        # allowance no matter how much global concurrency is available.
+        ManifestProber(
+            corpus,
+            session_factory=Tracking,
+            concurrency=12,
+            per_host_delay=0.0,
+            per_host_concurrency=3,
+        ).crawl()
+
+        assert peak == 3
+
+    def test_per_host_concurrency_of_one_is_still_strict_serialization(self, corpus):
+        seed(corpus, *[(f"s{n}", f"https://shared.example/mcp/{n}") for n in range(6)])
+
+        live = 0
+        peak = 0
+
+        class Tracking(ScriptedSession):
+            async def collect_manifest(self):
+                nonlocal live, peak
+                live += 1
+                peak = max(peak, live)
+                await asyncio.sleep(0.01)
+                live -= 1
+                return manifest_doc()
+
+        ManifestProber(
+            corpus,
+            session_factory=Tracking,
+            concurrency=6,
+            per_host_delay=0.0,
+            per_host_concurrency=1,
+        ).crawl()
 
         assert peak == 1
 

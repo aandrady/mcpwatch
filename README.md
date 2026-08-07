@@ -146,10 +146,20 @@ observations are separated by the whole cycle rather than by milliseconds:
 | Both failed | the failure status, with the other probe's verdict in `error_detail` |
 
 Safety is structural, not procedural: the MCP client implements no code path that can call a
-tool, so `tools/call` cannot be issued even by mistake. No credentials are ever sent. Concurrency
-is globally capped and strictly serialized per host, so a platform listing hundreds of servers
-sees one connection at a time. Observations commit as each server's second probe lands, so a
-cycle that dies halfway keeps what it collected.
+tool, so `tools/call` cannot be issued even by mistake. No credentials are ever sent.
+Observations commit as each server's second probe lands, so a cycle that dies halfway keeps what
+it collected.
+
+**Endpoints are not evenly spread across hosts, and that drives cycle time.** In the day-zero
+census one gateway (`gateway.pipeworx.io`) accounted for 1,311 of 10,373 targets — 12.6% — and
+the top six hosts for 1,797 between them. Serializing each host completely would make the whole
+cycle's wall-time hostage to its busiest host, and turn a bad day there into a runaway: 1,311
+probes timing out at 20s each is over seven hours for that host alone, per pass. So concurrency
+is capped *twice* — globally (`--concurrency`, default 50) and per host
+(`--per-host-concurrency`, default 4). A host never sees a fan-out proportional to how many
+servers it publishes, and any host with a handful of servers is still effectively serialized.
+`busiest_host_targets` is recorded per run as a health metric: if it climbs, the cycle is one bad
+day away from running long, and a Layer-2 cycle that overruns eats the next one.
 
 TLS failures land under `unreachable` because the WP1 status enum has no `tls_error` member,
 with `error_class` preserving the distinction — the enum stays stable and precision lives where
