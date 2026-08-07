@@ -16,10 +16,27 @@ editing over SSH through Bash heredocs is slow and error-prone. Then deploy and 
 
 ```
 ssh mcpwatch        # → [redacted-user]@[redacted-ip] ([redacted-host]), key auth, non-interactive
+git push vps main   # deploy: post-receive hook checks out into ~/code/mcpwatch
 ```
 
-Remote project root: `~/code/mcpwatch/` (`corpus/blobs/`, `logs/`).
-No `rsync` locally; deploy with tar over ssh or git.
+Deploy is git-based. `vps` remote → bare repo `~/code/mcpwatch.git`; its `post-receive` hook
+runs `checkout -f main` into the work tree `~/code/mcpwatch/`. Commit locally, push, done.
+`checkout -f` never removes untracked files, so anything not in git is safe.
+
+**Paths on the VPS:**
+
+| Path | Contents | In git? |
+|---|---|---|
+| `~/code/mcpwatch/` | code work tree (deploy target) | yes |
+| `~/code/mcpwatch.git/` | bare deploy repo | — |
+| `~/mcpwatch-corpus/` | **the corpus** — `blobs/`, db, `logs/` | **no, and deliberately outside the work tree** |
+
+The corpus sits outside the work tree on purpose: it is irreplaceable, and no `git clean`,
+`checkout -f`, or branch switch can reach it. Never move it inside, and never point a container
+mount at it.
+
+`.gitattributes` forces `eol=lf` — authoring is on Windows, execution is Linux, and CRLF would
+break shell scripts and systemd units with `bad interpreter: /bin/bash^M`.
 
 | | Local (this dir) | VPS |
 |---|---|---|
