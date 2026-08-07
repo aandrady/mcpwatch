@@ -24,5 +24,6 @@ CPUQuota=200%
 MemoryMax=2G
 Nice=10
 
-[Install]
-WantedBy=default.target
+# No [Install] section on purpose. This service is activated by its timer;
+# giving it WantedBy=default.target would mean an `enable` also fires a probe on
+# every boot, outside the schedule.
