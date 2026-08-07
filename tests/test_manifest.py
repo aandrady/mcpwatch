@@ -153,6 +153,16 @@ class TestDoubleProbe:
         assert ScriptedSession.calls.count(URL_B) == 2
 
 
+class AbruptDeath(BaseException):
+    """Stands in for a kill signal.
+
+    Must derive from BaseException, not Exception: `_probe` deliberately catches
+    every Exception and turns it into a recorded failure, so a plain exception
+    would never propagate far enough to simulate a crash. KeyboardInterrupt
+    would work too, but pytest treats it as a session abort.
+    """
+
+
 class TestCrashResilience:
     def test_a_cycle_that_dies_midway_keeps_what_it_already_collected(self, corpus):
         """Layer-2 days cannot be re-collected, so partial data still matters."""
@@ -166,10 +176,10 @@ class TestCrashResilience:
                 done += 1
                 if done > 9:  # 6 probes in pass A, then part way through pass B
                     msg = "collector died"
-                    raise KeyboardInterrupt(msg)
+                    raise AbruptDeath(msg)
                 return manifest_doc()
 
-        with pytest.raises(KeyboardInterrupt):
+        with pytest.raises(AbruptDeath):
             ManifestProber(
                 corpus, session_factory=Exploding, concurrency=1, per_host_delay=0.0
             ).crawl()
