@@ -1,0 +1,70 @@
+[project]
+name = "mcpwatch"
+version = "0.1.0"
+description = "Longitudinal observatory measuring how MCP server tool definitions mutate after publication"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "MCPWatch" }]
+# The storage layer is deliberately stdlib-only: sqlite3, hashlib, gzip, json.
+# Collectors (WP2/WP3) may add HTTP dependencies; the corpus must never depend on them.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcpwatch"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "PTH",  # use pathlib
+    "RUF",  # ruff-specific
+    "ANN",  # annotations
+    "D",    # docstrings
+]
+ignore = [
+    "D203",  # conflicts with D211
+    "D213",  # conflicts with D212
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "ANN"]
+
+# Strict over the package only. Tests build JSON documents as literals, and a
+# recursive `JsonValue` alias rejects `dict[str, dict[str, str]]` under
+# invariance — noise that says nothing about the code under test. Collectors are
+# unaffected: they pass `json.loads` output, which is `Any`.
+[tool.mypy]
+strict = true
+files = ["src"]
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
