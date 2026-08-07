@@ -99,6 +99,85 @@ A server that shuffles its tool order daily produces a stable `norm_sha` (no pha
 but a new *raw* blob each day, since the wire bytes genuinely differ. That is the price of
 retroactive replayability and it is worth paying — a few KB per affected server per day.
 
+## `mcpwatch.collect` — the collectors (WP2, WP3)
+
+Both obey the same non-negotiable rules: an identifying User-Agent carrying a reachable contact
+(`mcpwatch@iyre.com`, refused if blank), conservative self-imposed rate limits, backoff on
+429/5xx, and failures recorded as observations rather than skipped. Crawl reliability is a
+reported metric, so a silent gap is worse than a logged error.
+
+### Layer 1 — registry (`mcpwatch.collect.registry`)
+
+```bash
+uv run python -m mcpwatch.collect.registry --mode incremental
+```
+
+One observation per server per run holding its complete latest-version record. `--mode full`
+walks every page (~206 pages, ~350s); `--mode incremental` uses `updated_since` watermarked from
+the last *complete* run (~1 page, ~1.5s). Only a full crawl can observe absence, so only a full
+crawl records it.
+
+Version-level history is not this collector's job — the registry keeps it retrospectively at
+`/v0/servers/{name}/versions`, and WP5 backfills it.
+
+**`version=latest` is an optimization, never a correctness dependency.** It cuts the walk from
+~675 pages to ~206, but the registry silently ignores unknown query parameters, so if it were
+ever dropped we would quietly start ingesting version rows as if they were servers. Every record
+is re-checked against `isLatest` on our side and non-latest rows are counted into run stats.
+
+**A truncated crawl (`--max-pages`) never anchors a watermark.** It finishes cleanly, so without
+that exclusion it would anchor the next incremental run — which asks only for *changed* records,
+permanently skipping every page the truncated crawl never reached.
+
+### Layer 2 — live manifests (`mcpwatch.collect.manifest`)
+
+```bash
+uv run python -m mcpwatch.collect.manifest --concurrency 50
+```
+
+The irreplaceable one. Every server is probed **twice per run**, in two separate passes so the
+observations are separated by the whole cycle rather than by milliseconds:
+
+| Outcome | Recorded as |
+|---|---|
+| Both probes agree | `ok` |
+| Both succeed, hashes differ | `nondeterministic` — manifest still stored, quarantined from statistics |
+| Only one probe succeeded | `ok` + `error_class=determinism_unverified` |
+| Both failed | the failure status, with the other probe's verdict in `error_detail` |
+
+Safety is structural, not procedural: the MCP client implements no code path that can call a
+tool, so `tools/call` cannot be issued even by mistake. No credentials are ever sent. Concurrency
+is globally capped and strictly serialized per host, so a platform listing hundreds of servers
+sees one connection at a time. Observations commit as each server's second probe lands, so a
+cycle that dies halfway keeps what it collected.
+
+TLS failures land under `unreachable` because the WP1 status enum has no `tls_error` member,
+with `error_class` preserving the distinction — the enum stays stable and precision lives where
+it costs nothing.
+
+## Operations
+
+```bash
+bash deploy/install-timers.sh
+```
+
+systemd **user** timers (sudo needs a password on the collection host; `Linger=yes` is enabled):
+registry delta daily 03:00 UTC, registry full reconciliation Sunday 02:00 UTC, manifest probe
+daily 03:30 UTC. `Persistent=true` so a run missed during downtime fires on next boot instead of
+leaving a hole in the series.
+
+```bash
+systemctl --user list-timers 'mcpwatch-*'
+```
+
+```bash
+journalctl --user -u mcpwatch-manifest.service -n 50
+```
+
+An **unfinished run** (`finished_at IS NULL`) is the signal that a cycle died. Collectors
+deliberately never auto-close a crashed run, because that would make a broken collector look
+healthy.
+
 ## Development
 
 ```bash
