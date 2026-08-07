@@ -1,0 +1,9 @@
+# Authoring is on Windows, production is Linux. Force LF in the repo so shell
+# scripts and systemd units don't arrive on the VPS with CRLF and fail with
+# "bad interpreter: /bin/bash^M".
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gz  binary
+*.db  binary

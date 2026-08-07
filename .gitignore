@@ -20,6 +20,9 @@ venv/
 dist/
 build/
 
+# Machine-local Claude Code permission grants (settings.json is shared, .local is not)
+.claude/settings.local.json
+
 # Scratch
 scratch/
 *.tmp
