@@ -471,3 +471,75 @@ class TestCycleLock:
             assert first is True
         with exclusive_cycle(corpus.root) as second:
             assert second is True
+
+
+class TestChunking:
+    def test_a_deadline_mid_cycle_keeps_completed_chunks(self, corpus):
+        """The whole point: three hours of probing must not yield zero rows."""
+        seed(corpus, *[(f"s{n}", f"https://h{n}.example/mcp") for n in range(9)])
+
+        seen = 0
+
+        class Creeping(ScriptedSession):
+            async def collect_manifest(self):
+                nonlocal seen
+                seen += 1
+                if seen > 12:  # two chunks of 3 done (12 probes), then stall
+                    await asyncio.sleep(30)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Creeping,
+            concurrency=3,
+            per_host_delay=0.0,
+            chunk_size=3,
+            deadline_seconds=2.0,
+        ).crawl()
+
+        assert stats.deadline_exceeded is True
+        assert stats.chunks_done == 2
+        assert stats.probed == 6  # both completed chunks committed
+        assert corpus.index.unfinished_runs() == []
+
+    def test_all_chunks_complete_when_there_is_time(self, corpus):
+        seed(corpus, *[(f"s{n}", f"https://h{n}.example/mcp") for n in range(7)])
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=ScriptedSession,
+            concurrency=4,
+            per_host_delay=0.0,
+            chunk_size=3,
+        ).crawl()
+
+        assert stats.chunks_done == 3  # 3 + 3 + 1
+        assert stats.probed == 7
+        assert stats.deadline_exceeded is False
+
+    def test_each_chunk_uses_its_own_first_pass_results(self, corpus):
+        """A chunk must not compare against another chunk's probe."""
+        seed(corpus, ("a", URL_A), ("b", URL_B))
+        drifting = copy.deepcopy(manifest_doc())
+        drifting["tools"][0]["description"] = "changed between probes"
+        ScriptedSession.program(**{URL_A: [manifest_doc(), drifting], URL_B: [manifest_doc()] * 2})
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=ScriptedSession,
+            concurrency=1,
+            per_host_delay=0.0,
+            chunk_size=1,
+        ).crawl()
+
+        assert stats.nondeterministic == 1
+        assert stats.ok == 1
+
+    def test_probe_timings_are_recorded(self, corpus):
+        seed(corpus, ("a", URL_A))
+        ScriptedSession.program(**{URL_A: [manifest_doc()] * 2})
+
+        stats = prober(corpus).crawl()
+
+        assert stats.probe_seconds_total >= 0.0
+        assert stats.probe_max_seconds >= stats.probe_p50_seconds
