@@ -391,3 +391,83 @@ class TestStats:
         ScriptedSession.program(**{URL_A: [manifest_doc()] * 2})
         prober(corpus).crawl()
         assert corpus.index.unfinished_runs() == []
+
+
+class TestBoundedCycle:
+    def test_a_cycle_that_overruns_its_deadline_still_closes_its_run(self, corpus):
+        """An unbounded cycle eventually overruns into the next day's run."""
+        seed(corpus, *[(f"s{n}", f"https://h{n}.example/mcp") for n in range(4)])
+
+        class Slow(ScriptedSession):
+            async def collect_manifest(self):
+                await asyncio.sleep(5)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Slow,
+            concurrency=4,
+            per_host_delay=0.0,
+            deadline_seconds=0.2,
+        ).crawl()
+
+        assert stats.deadline_exceeded is True
+        assert stats.truncated is True
+        # Closed honestly rather than left dangling for systemd to SIGTERM.
+        assert corpus.index.unfinished_runs() == []
+
+    def test_a_cycle_inside_its_deadline_is_not_flagged(self, corpus):
+        seed(corpus, ("a", URL_A))
+        ScriptedSession.program(**{URL_A: [manifest_doc()] * 2})
+
+        stats = prober(corpus, deadline_seconds=60).crawl()
+
+        assert stats.deadline_exceeded is False
+        assert stats.ok == 1
+
+    def test_partial_work_survives_the_deadline(self, corpus):
+        """Whatever pass B committed before the cut-off is kept."""
+        seed(corpus, *[(f"s{n}", f"https://h{n}.example/mcp") for n in range(6)])
+
+        calls = 0
+
+        class Creeping(ScriptedSession):
+            async def collect_manifest(self):
+                nonlocal calls
+                calls += 1
+                if calls > 9:
+                    await asyncio.sleep(10)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Creeping,
+            concurrency=1,
+            per_host_delay=0.0,
+            deadline_seconds=1.5,
+        ).crawl()
+
+        assert stats.deadline_exceeded is True
+        recorded = corpus.index.connection.execute(
+            "SELECT count(*) AS n FROM observation WHERE layer = 'manifest'"
+        ).fetchone()["n"]
+        assert 0 < recorded < 6
+
+
+class TestCycleLock:
+    def test_a_second_cycle_declines_rather_than_competing(self, corpus, capsys):
+        from mcpwatch.collect.manifest import exclusive_cycle, main
+
+        with exclusive_cycle(corpus.root) as held:
+            assert held is True
+            assert main(["--corpus", str(corpus.root)]) == 3
+
+        assert "declining rather than competing" in capsys.readouterr().err
+
+    def test_the_lock_is_released_afterwards(self, corpus):
+        from mcpwatch.collect.manifest import exclusive_cycle
+
+        with exclusive_cycle(corpus.root) as first:
+            assert first is True
+        with exclusive_cycle(corpus.root) as second:
+            assert second is True
