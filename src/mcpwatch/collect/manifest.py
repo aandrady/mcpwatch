@@ -6,16 +6,24 @@ collected is gone permanently, which is why this ships crude-and-running rather
 than clean-and-next-week.
 
 **The double probe is the point.** Every server is probed twice per run, in two
-separate passes so the two observations are separated by the whole cycle rather
-than by milliseconds. If the two normalized hashes disagree, the server is
-recorded ``nondeterministic`` and quarantined from mutation statistics. Without
-this, a server that randomizes tool order or embeds a session id in a
-description registers a mutation *every single day* and silently destroys the
-headline base rate — the failure mode BUILD-PLAN §3 identifies as most likely to
-ruin the dataset.
+passes over a chunk of targets, so the two observations are separated by the
+chunk's duration rather than by milliseconds. If the two normalized hashes
+disagree, the server is recorded ``nondeterministic`` and quarantined from
+mutation statistics. Without this, a server that randomizes tool order or embeds
+a session id in a description registers a mutation *every single day* and
+silently destroys the headline base rate — the failure mode BUILD-PLAN §3
+identifies as most likely to ruin the dataset.
 
-Memory matters at 10k servers: pass A keeps only each server's normalized hash
-and discards the document. Only pass B's manifest is retained and stored.
+Work is chunked rather than run as two whole-population passes. The whole-
+population version recorded nothing until every server had been probed once,
+so a cycle that ran out of time during the first pass discarded everything it
+had done — three hours of probing for zero observations, observed in
+production. Chunking bounds that loss to the chunk in flight, at the cost of
+shorter spacing between a server's two probes.
+
+Memory matters at 10k servers: the first pass keeps only each server's
+normalized hash and discards the document. Only the second pass's manifest is
+retained and stored.
 
 Safety properties, by construction rather than by discipline:
 
@@ -73,11 +81,24 @@ collected, rather than being SIGTERMed mid-write by the service manager.
 DEFAULT_RESOLVER_WORKERS = 64
 """Threads available to `getaddrinfo`.
 
-Not a micro-optimization. asyncio resolves names on the loop's default executor,
-sized `min(32, cpu_count + 4)` — eight threads here. Across ~8,000 distinct
-hosts, many of them dead and slow to fail, that was the single largest cost in a
-cycle: 175 minutes for pass A versus 16 for pass B, the only difference being a
-warm resolver cache the second time round.
+asyncio resolves names on the loop's default executor, sized
+`min(32, cpu_count + 4)` — eight threads on the collection host, against ~8,000
+distinct hostnames. Widening it is cheap and removes an obvious serialization
+point.
+
+It is *not* the explanation for the slow first pass, though it was the first
+theory: raising this to 64 made no measurable difference to a full cycle. Kept
+because it is still correct, but the real cause is elsewhere — see
+`probe_p50_seconds` / `probe_p95_seconds` in the run stats, which exist to find
+it with measurements rather than another guess.
+"""
+
+DEFAULT_CHUNK_SIZE = 500
+"""Targets probed A-then-B before moving on.
+
+Sets both the spacing between a server's two probes and the maximum work a
+deadline can discard. Smaller means less lost when a cycle runs out of time and
+weaker spacing; larger means the reverse.
 """
 
 DEFAULT_PER_HOST_CONCURRENCY = 4
@@ -117,6 +138,12 @@ class ManifestStats:
     concurrency: int = DEFAULT_CONCURRENCY
     per_host_concurrency: int = DEFAULT_PER_HOST_CONCURRENCY
     resolver_workers: int = DEFAULT_RESOLVER_WORKERS
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    chunks_done: int = 0
+    probe_seconds_total: float = 0.0
+    probe_p50_seconds: float = 0.0
+    probe_p95_seconds: float = 0.0
+    probe_max_seconds: float = 0.0
     busiest_host_targets: int = 0
     truncated: bool = False
     deadline_exceeded: bool = False
@@ -224,6 +251,7 @@ class ManifestProber:
         per_host_concurrency: int = DEFAULT_PER_HOST_CONCURRENCY,
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
         resolver_workers: int = DEFAULT_RESOLVER_WORKERS,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
         session_factory: SessionFactory | None = None,
     ) -> None:
         """Configure a prober.
@@ -237,6 +265,7 @@ class ManifestProber:
             per_host_concurrency: Simultaneous probes allowed per host.
             deadline_seconds: Hard ceiling on one cycle.
             resolver_workers: Threads available for DNS resolution.
+            chunk_size: Targets probed A-then-B before committing and moving on.
             session_factory: Override the MCP session class, for tests.
         """
         self.corpus = corpus
@@ -247,6 +276,8 @@ class ManifestProber:
         self.per_host_concurrency = max(1, per_host_concurrency)
         self.deadline_seconds = deadline_seconds
         self.resolver_workers = max(1, resolver_workers)
+        self.chunk_size = max(1, chunk_size)
+        self._durations: list[float] = []
         self._session_factory = session_factory or McpSession
 
     # -------------------------------------------------------------- targets ---
@@ -279,6 +310,20 @@ class ManifestProber:
         self, client: httpx.AsyncClient, target: Target, *, keep_document: bool
     ) -> ProbeOutcome:
         """Probe one server once. Never raises; failures become outcomes."""
+        started = time.monotonic()
+        try:
+            return await self._probe_inner(client, target, keep_document=keep_document)
+        finally:
+            # Recorded for every probe including failures: knowing that the
+            # cycle's time goes into a tail of slow servers, rather than being
+            # spread evenly, is the difference between tuning the right knob and
+            # the wrong one.
+            self._durations.append(time.monotonic() - started)
+
+    async def _probe_inner(
+        self, client: httpx.AsyncClient, target: Target, *, keep_document: bool
+    ) -> ProbeOutcome:
+        """Body of :meth:`_probe`, without the timing wrapper."""
         try:
             session = self._session_factory(
                 client=client, url=target.endpoint, timeout=self.timeout
@@ -374,6 +419,7 @@ class ManifestProber:
         stats = ManifestStats(targets=len(targets), concurrency=self.concurrency)
         stats.per_host_concurrency = self.per_host_concurrency
         stats.resolver_workers = self.resolver_workers
+        stats.chunk_size = self.chunk_size
         stats.truncated = limit is not None
         host_counts: dict[str, int] = defaultdict(int)
         for target in targets:
@@ -392,20 +438,38 @@ class ManifestProber:
         run_id = self.corpus.start_run(COLLECTOR, COLLECTOR_VERSION)
 
         async def both_passes() -> None:
-            mark = time.monotonic()
-            first = await self._run_pass(targets, keep_documents=False)
-            stats.pass_a_seconds = round(time.monotonic() - mark, 3)
+            # Chunked rather than two whole-population passes.
+            #
+            # Two full passes meant nothing at all was recorded until every
+            # server had been probed once, so a cycle that ran out of time
+            # during pass A threw away every hour it had spent — observed
+            # exactly once in production, three hours of probing for zero
+            # observations. Chunking bounds that loss to the chunk in flight.
+            #
+            # The cost is spacing: the two probes of a server are now separated
+            # by roughly one chunk instead of one cycle. That is still ample for
+            # what the guard is actually for — randomized tool order, session
+            # ids embedded in descriptions — and drift over longer horizons is
+            # what the day-over-day comparison is for.
+            for start in range(0, len(targets), self.chunk_size):
+                chunk = targets[start : start + self.chunk_size]
 
-            # Commit each observation the moment its second probe lands, rather
-            # than batching at the end. A cycle that dies halfway then keeps
-            # everything it had already collected; batching would throw the whole
-            # day away, and Layer-2 days cannot be re-collected.
-            def commit(target: Target, outcome: ProbeOutcome) -> None:
-                self._record(target, first[target.server_key], outcome, run_id, stats)
+                mark = time.monotonic()
+                first = await self._run_pass(chunk, keep_documents=False)
+                stats.pass_a_seconds = round(stats.pass_a_seconds + time.monotonic() - mark, 3)
 
-            mark = time.monotonic()
-            await self._run_pass(targets, keep_documents=True, on_complete=commit)
-            stats.pass_b_seconds = round(time.monotonic() - mark, 3)
+                # Commit each observation the moment its second probe lands.
+                def commit(
+                    target: Target,
+                    outcome: ProbeOutcome,
+                    _first: dict[str, ProbeOutcome] = first,
+                ) -> None:
+                    self._record(target, _first[target.server_key], outcome, run_id, stats)
+
+                mark = time.monotonic()
+                await self._run_pass(chunk, keep_documents=True, on_complete=commit)
+                stats.pass_b_seconds = round(stats.pass_b_seconds + time.monotonic() - mark, 3)
+                stats.chunks_done += 1
 
         # A cycle must be bounded. Left unbounded it will eventually overrun into
         # the next day's run, and two probers against the same third-party hosts
@@ -418,9 +482,20 @@ class ManifestProber:
             stats.deadline_exceeded = True
             stats.truncated = True
 
+        self._summarize_durations(stats)
         stats.wall_seconds = round(time.monotonic() - started, 3)
         self.corpus.finish_run(run_id, stats=stats.as_json())
         return stats
+
+    def _summarize_durations(self, stats: ManifestStats) -> None:
+        """Fold per-probe timings into the run stats."""
+        if not self._durations:
+            return
+        ordered = sorted(self._durations)
+        stats.probe_seconds_total = round(sum(ordered), 1)
+        stats.probe_p50_seconds = round(ordered[len(ordered) // 2], 3)
+        stats.probe_p95_seconds = round(ordered[int(len(ordered) * 0.95)], 3)
+        stats.probe_max_seconds = round(ordered[-1], 3)
 
     def _record(
         self,
@@ -573,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contact", default=os.environ.get("MCPWATCH_CONTACT", DEFAULT_CONTACT))
     parser.add_argument("--deadline-seconds", type=float, default=DEFAULT_DEADLINE_SECONDS)
     parser.add_argument("--resolver-workers", type=int, default=DEFAULT_RESOLVER_WORKERS)
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     args = parser.parse_args(argv)
 
     with exclusive_cycle(args.corpus) as acquired:
@@ -594,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
                 per_host_concurrency=args.per_host_concurrency,
                 deadline_seconds=args.deadline_seconds,
                 resolver_workers=args.resolver_workers,
+                chunk_size=args.chunk_size,
             )
             try:
                 stats = prober.crawl(limit=args.limit)
