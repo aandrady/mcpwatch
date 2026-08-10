@@ -87,10 +87,29 @@ distinct hostnames. Widening it is cheap and removes an obvious serialization
 point.
 
 It is *not* the explanation for the slow first pass, though it was the first
-theory: raising this to 64 made no measurable difference to a full cycle. Kept
-because it is still correct, but the real cause is elsewhere — see
-`probe_p50_seconds` / `probe_p95_seconds` in the run stats, which exist to find
-it with measurements rather than another guess.
+theory: raising this to 64 made no measurable difference to a full cycle. The
+actual cause turned out to be single probes that never finished — see
+:data:`DEFAULT_PROBE_BUDGET_SECONDS`. Kept because it is still correct, and
+recorded here because a plausible theory that measurement refuted is worth
+leaving written down.
+"""
+
+DEFAULT_PROBE_BUDGET_SECONDS = 60.0
+"""Total wall-clock a single server's whole conversation may consume.
+
+Distinct from ``--timeout``, and the difference is the entire point. httpx's
+timeout applies per socket operation, so a server that trickles bytes — an
+event-stream sending periodic keep-alives, say — resets the read timeout
+forever and the response never completes. One such endpoint holds a concurrency
+slot and blocks its chunk indefinitely.
+
+Not hypothetical: a measured cycle recorded ``probe_max_seconds`` of 9,729 —
+one probe running for 2.7 hours, consuming 47% of all probe time in the run and
+stalling everything behind it. That single endpoint is the whole explanation
+for cycles that never finished.
+
+60s is ~27x the observed p95 of 2.2s, so it cuts off hangs without truncating
+servers that are merely slow.
 """
 
 DEFAULT_CHUNK_SIZE = 500
@@ -144,6 +163,7 @@ class ManifestStats:
     probe_p50_seconds: float = 0.0
     probe_p95_seconds: float = 0.0
     probe_max_seconds: float = 0.0
+    probe_budget_seconds: float = DEFAULT_PROBE_BUDGET_SECONDS
     busiest_host_targets: int = 0
     truncated: bool = False
     deadline_exceeded: bool = False
@@ -250,6 +270,7 @@ class ManifestProber:
         per_host_delay: float = DEFAULT_PER_HOST_DELAY,
         per_host_concurrency: int = DEFAULT_PER_HOST_CONCURRENCY,
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+        probe_budget_seconds: float = DEFAULT_PROBE_BUDGET_SECONDS,
         resolver_workers: int = DEFAULT_RESOLVER_WORKERS,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         session_factory: SessionFactory | None = None,
@@ -264,6 +285,7 @@ class ManifestProber:
             per_host_delay: Pause held against a host after finishing with it.
             per_host_concurrency: Simultaneous probes allowed per host.
             deadline_seconds: Hard ceiling on one cycle.
+            probe_budget_seconds: Hard ceiling on one server's whole conversation.
             resolver_workers: Threads available for DNS resolution.
             chunk_size: Targets probed A-then-B before committing and moving on.
             session_factory: Override the MCP session class, for tests.
@@ -275,6 +297,7 @@ class ManifestProber:
         self.per_host_delay = per_host_delay
         self.per_host_concurrency = max(1, per_host_concurrency)
         self.deadline_seconds = deadline_seconds
+        self.probe_budget_seconds = probe_budget_seconds
         self.resolver_workers = max(1, resolver_workers)
         self.chunk_size = max(1, chunk_size)
         self._durations: list[float] = []
@@ -312,7 +335,22 @@ class ManifestProber:
         """Probe one server once. Never raises; failures become outcomes."""
         started = time.monotonic()
         try:
-            return await self._probe_inner(client, target, keep_document=keep_document)
+            # The hard stop on a single server. Without it one endpoint that
+            # never finishes its response holds a concurrency slot for hours and
+            # its chunk never completes.
+            return await asyncio.wait_for(
+                self._probe_inner(client, target, keep_document=keep_document),
+                timeout=self.probe_budget_seconds,
+            )
+        except TimeoutError:
+            return ProbeOutcome(
+                status=ObservationStatus.TIMEOUT,
+                error_class="probe_budget_exceeded",
+                error_detail=(
+                    f"no complete manifest within {self.probe_budget_seconds:.0f}s; "
+                    "the response never finished arriving"
+                ),
+            )
         finally:
             # Recorded for every probe including failures: knowing that the
             # cycle's time goes into a tail of slow servers, rather than being
@@ -420,6 +458,7 @@ class ManifestProber:
         stats.per_host_concurrency = self.per_host_concurrency
         stats.resolver_workers = self.resolver_workers
         stats.chunk_size = self.chunk_size
+        stats.probe_budget_seconds = self.probe_budget_seconds
         stats.truncated = limit is not None
         host_counts: dict[str, int] = defaultdict(int)
         for target in targets:
@@ -649,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--deadline-seconds", type=float, default=DEFAULT_DEADLINE_SECONDS)
     parser.add_argument("--resolver-workers", type=int, default=DEFAULT_RESOLVER_WORKERS)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument("--probe-budget-seconds", type=float, default=DEFAULT_PROBE_BUDGET_SECONDS)
     args = parser.parse_args(argv)
 
     with exclusive_cycle(args.corpus) as acquired:
@@ -671,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                 deadline_seconds=args.deadline_seconds,
                 resolver_workers=args.resolver_workers,
                 chunk_size=args.chunk_size,
+                probe_budget_seconds=args.probe_budget_seconds,
             )
             try:
                 stats = prober.crawl(limit=args.limit)

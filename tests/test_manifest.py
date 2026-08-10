@@ -543,3 +543,68 @@ class TestChunking:
 
         assert stats.probe_seconds_total >= 0.0
         assert stats.probe_max_seconds >= stats.probe_p50_seconds
+
+
+class TestProbeBudget:
+    def test_a_probe_that_never_finishes_is_cut_off(self, corpus):
+        """One endpoint trickling bytes must not hold a slot for hours."""
+        seed(corpus, ("a", URL_A))
+
+        class Endless(ScriptedSession):
+            async def collect_manifest(self):
+                await asyncio.sleep(3600)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Endless,
+            concurrency=2,
+            per_host_delay=0.0,
+            probe_budget_seconds=0.2,
+        ).crawl()
+
+        obs = corpus.latest_observation("a", layer=Layer.MANIFEST)
+        assert obs.status is ObservationStatus.TIMEOUT
+        assert obs.error_class == "probe_budget_exceeded"
+        assert stats.status_counts == {"timeout": 1}
+
+    def test_one_hung_server_does_not_block_the_others(self, corpus):
+        """The failure that stalled entire cycles."""
+        seed(corpus, ("slow", "https://slow.example/mcp"), ("fast", "https://fast.example/mcp"))
+
+        class Mixed(ScriptedSession):
+            async def collect_manifest(self):
+                if "slow" in self.url:
+                    await asyncio.sleep(3600)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Mixed,
+            concurrency=2,
+            per_host_delay=0.0,
+            probe_budget_seconds=0.3,
+            deadline_seconds=30,
+        ).crawl()
+
+        assert stats.deadline_exceeded is False
+        assert stats.ok == 1
+        assert stats.status_counts.get("timeout") == 1
+
+    def test_a_merely_slow_server_is_not_cut_off(self, corpus):
+        seed(corpus, ("a", URL_A))
+
+        class Slowish(ScriptedSession):
+            async def collect_manifest(self):
+                await asyncio.sleep(0.05)
+                return manifest_doc()
+
+        stats = ManifestProber(
+            corpus,
+            session_factory=Slowish,
+            concurrency=2,
+            per_host_delay=0.0,
+            probe_budget_seconds=5.0,
+        ).crawl()
+
+        assert stats.ok == 1
