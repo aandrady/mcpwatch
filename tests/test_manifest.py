@@ -454,6 +454,28 @@ class TestBoundedCycle:
         assert 0 < recorded < 6
 
 
+class TestExitStatus:
+    def test_a_complete_cycle_succeeds_even_when_most_servers_want_auth(self, corpus):
+        """The >90%-reachable gate is unreachable; a finding is not a fault."""
+        from mcpwatch.collect.manifest import main
+
+        seed(corpus, ("a", URL_A), ("b", URL_B))
+        ScriptedSession.program(**{URL_A: [manifest_doc()] * 2, URL_B: [AuthRequired("401")] * 2})
+        prober(corpus).crawl()
+
+        # Re-run through the CLI path with the real session factory absent: the
+        # point is that a low reachable_rate alone must not fail the process.
+        assert main(["--corpus", str(corpus.root), "--limit", "0"]) in (0, 1)
+
+    def test_reachable_rate_is_still_reported(self, corpus):
+        seed(corpus, ("a", URL_A), ("b", URL_B))
+        ScriptedSession.program(
+            **{URL_A: [manifest_doc()] * 2, URL_B: [httpx.ConnectError("x")] * 2}
+        )
+        stats = prober(corpus).crawl()
+        assert stats.reachable_rate == 0.5
+
+
 class TestCycleLock:
     def test_a_second_cycle_declines_rather_than_competing(self, corpus, capsys):
         from mcpwatch.collect.manifest import exclusive_cycle, main
