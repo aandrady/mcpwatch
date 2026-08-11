@@ -45,12 +45,11 @@ import ssl
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
@@ -59,9 +58,17 @@ from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, norm_sha
 
 from .errors import CollectorError
 from .http import DEFAULT_CONTACT, user_agent
+from .locks import exclusive_cycle
 from .mcp import AuthRequired, McpProtocolError, McpSession
 
-__all__ = ["COLLECTOR", "COLLECTOR_VERSION", "ManifestProber", "ManifestStats", "main"]
+__all__ = [
+    "COLLECTOR",
+    "COLLECTOR_VERSION",
+    "ManifestProber",
+    "ManifestStats",
+    "exclusive_cycle",
+    "main",
+]
 
 COLLECTOR = "manifest"
 COLLECTOR_VERSION = "0.1.0"
@@ -618,56 +625,6 @@ def _default_corpus_root() -> Path:
     """Corpus location: env override, else the documented production path."""
     override = os.environ.get("MCPWATCH_CORPUS")
     return Path(override) if override else Path.home() / "mcpwatch-corpus"
-
-
-def _try_lock(handle: IO[str]) -> bool:
-    """Take an exclusive advisory lock without blocking.
-
-    Kernel-held rather than a PID file: a lock released by the OS on process
-    exit cannot be left stale by a ``kill -9``, which matters here because
-    killing a wedged cycle is a thing that actually happens.
-    """
-    if sys.platform == "win32":
-        import msvcrt
-
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
-
-    # Reachable on the collection host. mypy narrows `sys.platform` to whichever
-    # machine is type-checking, so on the Windows authoring box it decides this
-    # branch is dead; it is the only branch that ever runs in production.
-    import fcntl  # type: ignore[unreachable]
-
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
-
-
-@contextmanager
-def exclusive_cycle(corpus_root: Path) -> Iterator[bool]:
-    """Hold an advisory lock so two probe cycles cannot overlap.
-
-    Two probers running at once double the load we place on every third-party
-    host and make both slower, so the second must decline rather than compete.
-    Yields True if the lock was acquired, False if another cycle holds it. The
-    lock is released when the process exits, however it exits.
-    """
-    lock_dir = corpus_root / "state"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    path = lock_dir / "manifest-cycle.lock"
-    # Nothing is written to the file: on Windows the locked byte range cannot be
-    # truncated, and the holder's identity is available from `ps` anyway. The
-    # lock is the whole point of the file.
-    handle = path.open("a+")
-    try:
-        yield _try_lock(handle)
-    finally:
-        handle.close()
 
 
 def main(argv: list[str] | None = None) -> int:

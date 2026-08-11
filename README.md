@@ -70,6 +70,13 @@ and `server` is a projection of the append-only identity history.
 `norm_version` they were hashed under. A future normalization change is replayed over the raw
 blobs; nothing is ever destroyed to make a hash come out differently.
 
+**3b. Three timestamps, never conflated.** `observed_at` is when MCPWatch retrieved something;
+`published_at` is when the registry says that state came into being (WP5 only — a live probe has
+no such thing); `effective_at` is a generated column, `coalesce(published_at, observed_at)`, and
+it is the chronology every query orders by. Backfilled history therefore sorts by publication
+date while `observed_at` keeps telling the truth about when we looked. Schema migrations are
+additive by rule: the corpus cannot be re-collected, so no migration may rewrite `observation`.
+
 **4. Hash stability is defended against phantom mutations.** `mcpwatch.store.canonical` sorts
 object keys recursively, sorts `tools`/`resources`/`resourceTemplates`/`prompts` and JSON
 Schema `required` arrays, strips a volatile-field denylist (session ids, nonces, request ids,
@@ -165,6 +172,62 @@ TLS failures land under `unreachable` because the WP1 status enum has no `tls_er
 with `error_class` preserving the distinction — the enum stays stable and precision lives where
 it costs nothing.
 
+### Retrospective backfill (`mcpwatch.collect.backfill`, WP5)
+
+```bash
+uv run python -m mcpwatch.collect.backfill          # both phases, ~9,000 requests
+```
+
+WP2 collects the present; this collects the past. The registry keeps every version ever
+published with its own `publishedAt`, so ~47,000 real mutation transitions already exist and can
+be read in an afternoon — the corpus WP6 and WP7 get calibrated against instead of synthetic
+fixtures. Layer 2 has no equivalent and never will.
+
+**Two phases, because the two endpoints know different things.**
+
+| Phase | Endpoint | Cost | What only it can do |
+|---|---|---|---|
+| `walk` | `/v0/servers?include_deleted=true` (no `version` filter) | ~675 requests | See withdrawn servers at all; identify which servers are multi-version |
+| `verify` | `/v0/servers/{name}/versions` | ~8,300 requests | Authoritative complete chain per server; 404s for withdrawn ones |
+
+The walk is a cursor over a dataset that mutates underneath it, so a server republishing
+mid-walk can shift rows past the cursor. Verify re-reads every server whose stored version count
+is anything other than exactly one — the multi-version population *plus* anything the walk
+produced nothing for, which is exactly what a skipped cursor looks like. The 12,159
+single-version servers are left alone: their `/versions` response is one row already held.
+
+**Publication time and observation time are different columns, and conflating them would falsify
+the series.** `observed_at` is always when MCPWatch read something; `published_at` is what the
+registry says about when the state came into being. `effective_at` is a generated column,
+`coalesce(published_at, observed_at)`, and it is what every chronological query orders by — a
+rule that lives in the schema so no caller can forget it. Schema v2 adds all three; a v1 corpus
+migrates in place, additively, with no observation row touched.
+
+**Idempotency is content-addressed.** A registry record embeds its own version string, so
+identical canonical bytes for the same server mean the same published version however it was
+fetched. Re-running stores nothing, and versions the daily crawl already captured are recognized
+rather than duplicated. A version whose record was *edited in place* — same publication
+timestamp, different content — is stored and counted separately as `versions_restated`: that is
+a republish invisible to anyone pinning a version number.
+
+**`deleted` means gone; `deprecated` does not.** Verified against production, a deprecated server
+is still returned by the default listing and still answers `/versions`. Only `deleted` produces
+the dated withdrawal marker that removes a server from WP3's target set — mistaking the two would
+cost Layer-2 observations that cannot be collected later.
+
+### The interim result (`mcpwatch.analyze.backfill`)
+
+```bash
+uv run python -m mcpwatch.analyze.backfill --out retrospective.md
+uv run python -m mcpwatch.analyze.backfill --json --out retrospective.json
+```
+
+Reads the corpus, writes nothing to it, takes no network: versions per server, time between
+versions, which registry fields move across a transition, and the endpoint / repository /
+package-identity swap lists that are WP7's highest-priority subset. It reports what changed and
+refuses to say whether that was benign — classification is WP7's job, and doing it here with
+ad-hoc heuristics would quietly become the number everyone cites.
+
 ## Operations
 
 ```bash
@@ -187,6 +250,17 @@ journalctl --user -u mcpwatch-manifest.service -n 50
 An **unfinished run** (`finished_at IS NULL`) is the signal that a cycle died. Collectors
 deliberately never auto-close a crashed run, because that would make a broken collector look
 healthy.
+
+The backfill ships as a unit with **no timer**, because it is a one-shot over history that is not
+going anywhere:
+
+```bash
+systemctl --user start mcpwatch-backfill.service
+```
+
+It is checkpointed per page and per server, so restarting it after a failure resumes rather than
+repeats. Run it outside the daily window (03:00–06:00 UTC) — nothing breaks if it overlaps, but
+two collectors contending for the same SQLite write lock is avoidable.
 
 ### Health checks
 

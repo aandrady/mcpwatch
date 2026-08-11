@@ -10,6 +10,11 @@ edited is not evidence of anything, and the trigger is the difference between a
 policy and a guarantee. ``run`` and ``server`` are mutable by design: a run is
 closed out after it finishes, and a server's current identity is a projection of
 its append-only ``server_identity`` history.
+
+Schema changes are migrations, never rewrites: :meth:`ObservationIndex._migrate`
+brings an older corpus up to :data:`SCHEMA_VERSION` by adding what is missing.
+The corpus is not reproducible, so a migration that drops or rebuilds
+``observation`` is not an option — every step here must be additive.
 """
 
 import json
@@ -19,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .errors import StoreError
 from .types import (
     JsonValue,
     Layer,
@@ -31,13 +37,17 @@ from .types import (
 
 __all__ = ["SCHEMA_VERSION", "ObservationIndex"]
 
-SCHEMA_VERSION = 1
-"""Bump whenever the DDL below changes in a way that needs a migration."""
+SCHEMA_VERSION = 2
+"""Bump whenever the DDL below changes in a way that needs a migration.
+
+v2 added ``observation.published_at`` and the derived ``observation.effective_at``
+for WP5's retrospective backfill.
+"""
 
 _LAYERS = ", ".join(f"'{member.value}'" for member in Layer)
 _STATUSES = ", ".join(f"'{member.value}'" for member in ObservationStatus)
 
-_SCHEMA = f"""
+_SCHEMA_TABLES = f"""
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -51,9 +61,6 @@ CREATE TABLE IF NOT EXISTS run (
     finished_at       TEXT,
     stats_json        TEXT
 );
-
-CREATE INDEX IF NOT EXISTS run_collector_started
-    ON run(collector, started_at);
 
 -- server_key is the primary identity: the registry's reverse-DNS namespaced
 -- `name`, e.g. "ac.inference.sh/mcp". repo_url and primary_endpoint are
@@ -69,9 +76,6 @@ CREATE TABLE IF NOT EXISTS server (
     last_seen        TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS server_repo_url ON server(repo_url);
-CREATE INDEX IF NOT EXISTS server_endpoint ON server(primary_endpoint);
-
 -- Append-only history of every distinct identity tuple a server has presented.
 -- Rows are added only when the tuple is new, so this stays small: one row per
 -- server plus one per identity change, not one per run.
@@ -83,14 +87,6 @@ CREATE TABLE IF NOT EXISTS server_identity (
     repo_url         TEXT,
     primary_endpoint TEXT
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS server_identity_tuple
-    ON server_identity(
-        server_key,
-        registry_name,
-        ifnull(repo_url, ''),
-        ifnull(primary_endpoint, '')
-    );
 
 CREATE TABLE IF NOT EXISTS observation (
     obs_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +101,20 @@ CREATE TABLE IF NOT EXISTS observation (
     error_class  TEXT,
     error_detail TEXT,
 
+    -- When the *registry* says this state came into being, as opposed to when we
+    -- retrieved it. Set by WP5's backfill from `_meta.publishedAt`; NULL for a
+    -- live probe, which has no such thing. Keeping the two apart is the whole
+    -- point: a version published in 2024 and read today is not an observation
+    -- made in 2024, and pretending otherwise would falsify the time series.
+    published_at TEXT,
+
+    -- The corpus's chronology key, derived rather than stored so no writer can
+    -- forget it and no two callers can disagree about the rule. Every ordering
+    -- that means "when was this true" uses this; `observed_at` stays available
+    -- for "when did we look". Identical to observed_at for every row that
+    -- predates v2, so the ordering of existing data is unchanged.
+    effective_at TEXT GENERATED ALWAYS AS (coalesce(published_at, observed_at)) VIRTUAL,
+
     CHECK (layer IN ({_LAYERS})),
     CHECK (status IN ({_STATUSES})),
     CHECK (norm_version IS NULL OR norm_version >= 0),
@@ -117,9 +127,32 @@ CREATE TABLE IF NOT EXISTS observation (
         OR (raw_sha IS NOT NULL AND norm_sha IS NOT NULL AND norm_version IS NOT NULL)
     )
 );
+"""
+
+_SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS run_collector_started
+    ON run(collector, started_at);
+
+CREATE INDEX IF NOT EXISTS server_repo_url ON server(repo_url);
+CREATE INDEX IF NOT EXISTS server_endpoint ON server(primary_endpoint);
+
+CREATE UNIQUE INDEX IF NOT EXISTS server_identity_tuple
+    ON server_identity(
+        server_key,
+        registry_name,
+        ifnull(repo_url, ''),
+        ifnull(primary_endpoint, '')
+    );
 
 CREATE INDEX IF NOT EXISTS observation_server_time
     ON observation(server_key, observed_at);
+CREATE INDEX IF NOT EXISTS observation_server_effective
+    ON observation(server_key, effective_at);
+-- (server_key, norm_sha) rather than norm_sha alone: every lookup that matters
+-- asks "have we already stored this exact content for *this* server", which is
+-- how the backfill stays idempotent without re-reading blobs.
+CREATE INDEX IF NOT EXISTS observation_server_norm
+    ON observation(server_key, norm_sha);
 CREATE INDEX IF NOT EXISTS observation_norm_sha
     ON observation(norm_sha);
 CREATE INDEX IF NOT EXISTS observation_run
@@ -179,18 +212,60 @@ class ObservationIndex:
         self._conn.execute("PRAGMA busy_timeout=30000")
 
     def _create_schema(self) -> None:
-        """Create tables, indexes, and triggers if they are not already present.
+        """Create tables, migrate an older corpus, then create indexes and triggers.
+
+        The order is load-bearing. Indexes are created after the migration
+        because some of them are over columns the migration adds, and a fresh
+        database and a migrated one must end up with exactly the same schema.
 
         Deliberately not wrapped in an explicit transaction: ``executescript``
         commits any pending one before it runs, so an outer ``BEGIN`` here would
         be closed out from under us.
         """
-        self._conn.executescript(_SCHEMA)
+        self._conn.executescript(_SCHEMA_TABLES)
+        self._migrate()
+        self._conn.executescript(_SCHEMA_INDEXES)
         self._conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)"
-            " ON CONFLICT(key) DO NOTHING",
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to :data:`SCHEMA_VERSION`.
+
+        Additive only, and driven by what the table actually has rather than by
+        the recorded version number — a corpus interrupted mid-migration should
+        converge on the next open instead of needing a repair. ``ADD COLUMN`` is
+        a metadata-only operation in SQLite and does not fire the append-only
+        triggers, so no observation row is read, rewritten, or touched.
+
+        Raises:
+            StoreError: If the database was written by a newer build than this
+                one. Reading a corpus under assumptions that no longer hold is
+                worse than refusing to open it.
+        """
+        recorded = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if recorded is not None and int(recorded["value"]) > SCHEMA_VERSION:
+            msg = (
+                f"corpus at {self.path} is schema v{recorded['value']}, but this build "
+                f"understands v{SCHEMA_VERSION}; refusing to open it with a newer schema"
+            )
+            raise StoreError(msg)
+
+        # table_xinfo, not table_info: the latter omits generated columns, so a
+        # freshly created v2 database would look like it still needed migrating
+        # and the ALTER would fail on a column that is already there.
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_xinfo(observation)")}
+        if "published_at" not in columns:
+            self._conn.execute("ALTER TABLE observation ADD COLUMN published_at TEXT")
+        if "effective_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE observation ADD COLUMN effective_at TEXT"
+                " GENERATED ALWAYS AS (coalesce(published_at, observed_at)) VIRTUAL"
+            )
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -310,6 +385,34 @@ class ObservationIndex:
             """,
             (server_key, registry_name, repo_url, primary_endpoint, seen_at, seen_at),
         )
+        self.record_identity(
+            server_key=server_key,
+            registry_name=registry_name,
+            repo_url=repo_url,
+            primary_endpoint=primary_endpoint,
+            observed_at=seen_at,
+        )
+
+    def record_identity(
+        self,
+        *,
+        server_key: str,
+        registry_name: str,
+        repo_url: str | None,
+        primary_endpoint: str | None,
+        observed_at: str,
+    ) -> None:
+        """Append an identity tuple without touching the ``server`` projection.
+
+        What :meth:`upsert_server` does minus the overwrite, for a caller reading
+        historical versions: every repo or endpoint a server has ever presented
+        belongs in the history — that is WP7's endpoint-swap signal — but an old
+        version must not be allowed to overwrite the server's *current* identity.
+
+        The unique index makes this idempotent, so the ``observed_at`` that
+        sticks is the first one written for a given tuple. Feed versions oldest
+        first and it reads as "when this identity first appeared".
+        """
         self._conn.execute(
             """
             INSERT OR IGNORE INTO server_identity(
@@ -317,14 +420,25 @@ class ObservationIndex:
             )
             VALUES(?, ?, ?, ?, ?)
             """,
-            (server_key, seen_at, registry_name, repo_url, primary_endpoint),
+            (server_key, observed_at, registry_name, repo_url, primary_endpoint),
         )
 
     def touch_server(self, server_key: str, *, seen_at: str) -> None:
-        """Extend a server's ``last_seen`` without touching its identity fields."""
+        """Widen the interval a server is known to have existed over.
+
+        Both ends fold, so evidence from any direction in time is absorbed
+        without overwriting anything: a daily crawl pushes ``last_seen``
+        forward, and a backfill reading a version published in 2024 pulls
+        ``first_seen`` back. Identity fields are left alone — an old version
+        must never be allowed to restate what a server currently is.
+        """
         self._conn.execute(
-            "UPDATE server SET last_seen = max(last_seen, ?) WHERE server_key = ?",
-            (seen_at, server_key),
+            """
+            UPDATE server
+            SET first_seen = min(first_seen, ?), last_seen = max(last_seen, ?)
+            WHERE server_key = ?
+            """,
+            (seen_at, seen_at, server_key),
         )
 
     def get_server(self, server_key: str) -> ServerRecord | None:
@@ -337,7 +451,10 @@ class ObservationIndex:
     def identity_history(self, server_key: str) -> list[ServerIdentity]:
         """Return every distinct identity tuple recorded for a server, oldest first."""
         rows = self._conn.execute(
-            "SELECT * FROM server_identity WHERE server_key = ? ORDER BY identity_id",
+            """
+            SELECT * FROM server_identity WHERE server_key = ?
+            ORDER BY observed_at, identity_id
+            """,
             (server_key,),
         ).fetchall()
         return [ServerIdentity.from_row(row) for row in rows]
@@ -362,19 +479,26 @@ class ObservationIndex:
         norm_version: int | None = None,
         error_class: str | None = None,
         error_detail: str | None = None,
+        published_at: str | None = None,
     ) -> int:
         """Append one observation and return its ``obs_id``.
 
         This is the only supported way to write to ``observation``; the table's
         triggers reject every UPDATE and DELETE.
+
+        ``published_at`` is the registry's own timestamp for the state being
+        recorded, and must be rendered by :func:`~mcpwatch.store.types.to_iso`
+        like every other corpus timestamp — ``effective_at`` orders rows as text,
+        so a stray ``Z`` suffix would sort into the wrong place.
         """
         cursor = self._conn.execute(
             """
             INSERT INTO observation(
                 run_id, server_key, layer, observed_at, status,
-                raw_sha, norm_sha, norm_version, error_class, error_detail
+                raw_sha, norm_sha, norm_version, error_class, error_detail,
+                published_at
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -387,6 +511,7 @@ class ObservationIndex:
                 norm_version,
                 error_class,
                 error_detail,
+                published_at,
             ),
         )
         rowid = cursor.lastrowid
@@ -410,11 +535,16 @@ class ObservationIndex:
     ) -> list[Observation]:
         """Return one server's observations in chronological order.
 
+        Chronology is ``effective_at``: a backfilled version published in 2024
+        belongs at its publication date, not at the instant the backfill job
+        happened to read it. For every observation collected forward in time
+        this is identical to ``observed_at``.
+
         Args:
             server_key: The server to query.
             layer: Restrict to one layer, or None for both.
-            since: Inclusive lower bound on ``observed_at``.
-            until: Exclusive upper bound on ``observed_at``.
+            since: Inclusive lower bound on ``effective_at``.
+            until: Exclusive upper bound on ``effective_at``.
         """
         sql = ["SELECT * FROM observation WHERE server_key = ?"]
         params: list[Any] = [server_key]
@@ -422,12 +552,12 @@ class ObservationIndex:
             sql.append("AND layer = ?")
             params.append(str(layer))
         if since is not None:
-            sql.append("AND observed_at >= ?")
+            sql.append("AND effective_at >= ?")
             params.append(since)
         if until is not None:
-            sql.append("AND observed_at < ?")
+            sql.append("AND effective_at < ?")
             params.append(until)
-        sql.append("ORDER BY observed_at, obs_id")
+        sql.append("ORDER BY effective_at, obs_id")
         rows = self._conn.execute(" ".join(sql), params).fetchall()
         return [Observation.from_row(row) for row in rows]
 
@@ -443,6 +573,13 @@ class ObservationIndex:
         Passing ``status=ObservationStatus.OK`` gives the last snapshot that
         actually carries content, which is the baseline a differ compares
         against — a run of failures must not be mistaken for a change.
+
+        "Most recent" is by ``effective_at``. That distinction only bites after a
+        backfill: loading a server's whole version history in one job leaves
+        dozens of rows sharing today's ``observed_at``, and the last one *read*
+        is not necessarily the last one *published*. Ordering by publication
+        keeps tomorrow's daily crawl comparing against the newest version rather
+        than against whichever historical row happened to be inserted last.
         """
         sql = ["SELECT * FROM observation WHERE server_key = ?"]
         params: list[Any] = [server_key]
@@ -452,17 +589,54 @@ class ObservationIndex:
         if status is not None:
             sql.append("AND status = ?")
             params.append(str(status))
-        sql.append("ORDER BY observed_at DESC, obs_id DESC LIMIT 1")
+        sql.append("ORDER BY effective_at DESC, obs_id DESC LIMIT 1")
         row = self._conn.execute(" ".join(sql), params).fetchone()
         return None if row is None else Observation.from_row(row)
 
     def observations_by_norm_sha(self, norm_sha: str) -> list[Observation]:
         """Return every observation sharing a normalized hash, chronologically."""
         rows = self._conn.execute(
-            "SELECT * FROM observation WHERE norm_sha = ? ORDER BY observed_at, obs_id",
+            "SELECT * FROM observation WHERE norm_sha = ? ORDER BY effective_at, obs_id",
             (norm_sha,),
         ).fetchall()
         return [Observation.from_row(row) for row in rows]
+
+    def has_content(self, server_key: str, *, layer: Layer, norm_sha: str) -> bool:
+        """Return whether this exact content is already stored for this server.
+
+        The backfill's idempotency test, and the reason it cannot duplicate what
+        the daily crawl already captured: a registry record carries its own
+        version string, so identical canonical bytes for the same server mean
+        the same published version, however it was fetched.
+        """
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM observation
+            WHERE server_key = ? AND layer = ? AND norm_sha = ? AND status = 'ok'
+            LIMIT 1
+            """,
+            (server_key, str(layer), norm_sha),
+        ).fetchone()
+        return row is not None
+
+    def has_marker(
+        self, server_key: str, *, layer: Layer, error_class: str, published_at: str
+    ) -> bool:
+        """Return whether a non-content marker row is already recorded.
+
+        Markers are observations that assert something the registry said rather
+        than a document it served — a withdrawal, say. They carry no blobs, so
+        :meth:`has_content` cannot recognize them.
+        """
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM observation
+            WHERE server_key = ? AND layer = ? AND error_class = ? AND published_at = ?
+            LIMIT 1
+            """,
+            (server_key, str(layer), error_class, published_at),
+        ).fetchone()
+        return row is not None
 
     def observations_for_run(self, run_id: str) -> list[Observation]:
         """Return every observation recorded by one run, in insertion order."""

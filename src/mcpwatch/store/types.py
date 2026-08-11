@@ -148,6 +148,16 @@ class Observation:
     addresses the canonicalized bytes under normalization version
     ``norm_version``. Keeping both is what makes a future normalization change
     replayable instead of destructive.
+
+    Three timestamps, and conflating them is how a longitudinal corpus starts
+    lying:
+
+    * ``observed_at`` — when MCPWatch retrieved this. Always true, always set.
+    * ``published_at`` — when the registry says this state came into being.
+      Only Layer-1 records carry one, and only WP5's backfill knows it for
+      history; NULL everywhere else.
+    * ``effective_at`` — the chronology key, ``published_at`` falling back to
+      ``observed_at``. Derived in SQL, so it cannot drift from that definition.
     """
 
     obs_id: int
@@ -161,6 +171,8 @@ class Observation:
     norm_version: int | None
     error_class: str | None
     error_detail: str | None
+    published_at: str | None
+    effective_at: str
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Observation:
@@ -177,6 +189,8 @@ class Observation:
             norm_version=row["norm_version"],
             error_class=row["error_class"],
             error_detail=row["error_detail"],
+            published_at=row["published_at"],
+            effective_at=row["effective_at"],
         )
 
 
