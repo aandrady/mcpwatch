@@ -203,12 +203,20 @@ registry says about when the state came into being. `effective_at` is a generate
 rule that lives in the schema so no caller can forget it. Schema v2 adds all three; a v1 corpus
 migrates in place, additively, with no observation row touched.
 
-**Idempotency is content-addressed.** A registry record embeds its own version string, so
-identical canonical bytes for the same server mean the same published version however it was
-fetched. Re-running stores nothing, and versions the daily crawl already captured are recognized
-rather than duplicated. A version whose record was *edited in place* — same publication
-timestamp, different content — is stored and counted separately as `versions_restated`: that is
-a republish invisible to anyone pinning a version number.
+**Idempotency keys on content *and* publication date together**, and the "and" was learned the
+hard way. Keying on content alone reads as obviously right — a registry record embeds its own
+version string, so identical canonical bytes mean the same version — but the daily crawl stores
+that same version *undated*, because a live crawl has no publication date to give. A
+content-only check therefore let every server's current version suppress the backfill row that
+would have carried its date. A production run lost exactly the most recent transition of every
+server before the numbers gave it away: 12,341 servers reporting zero dated versions when they
+each have one. The two rows are not duplicates — one says how the server looked when we crawled
+it, the other says when that version was published, and only the second can order history. It
+costs no bytes either way, because the blob store already holds the content.
+
+A version whose record was *edited in place* — same publication timestamp, different content —
+is stored and counted separately as `versions_restated`: that is a republish invisible to anyone
+pinning a version number.
 
 **`deleted` means gone; `deprecated` does not.** Verified against production, a deprecated server
 is still returned by the default listing and still answers `/versions`. Only `deleted` produces

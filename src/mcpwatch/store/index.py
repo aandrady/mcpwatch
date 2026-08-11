@@ -601,21 +601,39 @@ class ObservationIndex:
         ).fetchall()
         return [Observation.from_row(row) for row in rows]
 
-    def has_content(self, server_key: str, *, layer: Layer, norm_sha: str) -> bool:
-        """Return whether this exact content is already stored for this server.
+    def has_content(
+        self,
+        server_key: str,
+        *,
+        layer: Layer,
+        norm_sha: str,
+        published_at: str | None = None,
+    ) -> bool:
+        """Return whether this content is already stored for this server *as dated*.
 
-        The backfill's idempotency test, and the reason it cannot duplicate what
-        the daily crawl already captured: a registry record carries its own
-        version string, so identical canonical bytes for the same server mean
-        the same published version, however it was fetched.
+        The backfill's idempotency test. The date is part of the key, not an
+        afterthought, and leaving it out was a real bug: the daily crawl records
+        a server's current version undated, so a content-only check let every
+        server's newest version suppress the backfill row that would have
+        carried its publication date — costing exactly the most recent
+        transition of every server, the one most worth having.
+
+        Two rows with the same bytes and different dates are two different
+        facts: "this is how the server looked when we crawled it" and "this
+        version was published on this date". Only the second can order history.
+
+        ``IS`` rather than ``=`` so that an undated row matches an undated
+        query; ``published_at = NULL`` is never true and would defeat the check
+        for records the registry gives no timestamp for.
         """
         row = self._conn.execute(
             """
             SELECT 1 FROM observation
             WHERE server_key = ? AND layer = ? AND norm_sha = ? AND status = 'ok'
+              AND published_at IS ?
             LIMIT 1
             """,
-            (server_key, str(layer), norm_sha),
+            (server_key, str(layer), norm_sha, published_at),
         ).fetchone()
         return row is not None
 

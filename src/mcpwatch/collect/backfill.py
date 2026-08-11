@@ -38,10 +38,19 @@ today, and the corpus says exactly that. ``effective_at`` — the derived column
 the whole store orders by — resolves to the publication date, so the history
 lands in the right order regardless.
 
-**Idempotency** is content-addressed. A registry record embeds its own version
-string, so identical canonical bytes for the same server mean the same published
-version however it was fetched. Re-running writes nothing, and versions the daily
-crawl already captured are recognized rather than duplicated.
+**Idempotency** keys on content *and* publication date together, and the "and"
+was learned the hard way. Keying on content alone looks right — a registry record
+embeds its own version string, so identical canonical bytes mean the same
+version — but the daily crawl stores that same version *undated*, so a
+content-only check let every server's current version suppress the backfill row
+that would have carried its publication date. A production run lost exactly the
+most recent transition of every server before the numbers gave it away: 12,341
+servers reporting zero dated versions when they each have one.
+
+The two rows are not duplicates. One says "this is how the server looked when we
+crawled it"; the other says "this version was published on this date". Only the
+second can order history, and it costs no bytes, because the blob store already
+holds the content.
 """
 
 import argparse
@@ -669,8 +678,11 @@ class BackfillCollector:
         Returns:
             True if an observation was written.
         """
+        stamp = None if row.published_at is None else to_iso(row.published_at)
         norm_sha = norm_sha256(row.entry, self.corpus.policy)
-        if self.corpus.index.has_content(row.server_key, layer=Layer.REGISTRY, norm_sha=norm_sha):
+        if self.corpus.index.has_content(
+            row.server_key, layer=Layer.REGISTRY, norm_sha=norm_sha, published_at=stamp
+        ):
             stats.versions_skipped += 1
             return False
 
@@ -682,7 +694,7 @@ class BackfillCollector:
             published_at=row.published_at,
         )
         stats.versions_stored += 1
-        if row.published_at is not None and to_iso(row.published_at) in already:
+        if stamp is not None and stamp in already:
             stats.versions_restated += 1
         stats.blobs_written += int(write.raw.created) + int(write.normalized.created)
         stats.bytes_written += write.bytes_written
