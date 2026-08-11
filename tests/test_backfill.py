@@ -191,17 +191,60 @@ class TestIdempotency:
         assert corpus.blobs.count() == blobs_after_first
         assert corpus.index.count_observations() == observations_after_first
 
-    def test_it_does_not_duplicate_what_the_daily_crawl_already_captured(self, corpus, registry):
+    def test_it_dates_the_version_the_daily_crawl_captured_undated(self, corpus, registry):
+        """The regression that cost a production run.
+
+        The daily crawl stores a server's current version with no publication
+        date, because a live crawl has none to give. Skipping the backfill row
+        for that version — on the grounds that its bytes are already present —
+        drops the date, and with it the newest transition of every server in the
+        registry. Same bytes, different fact: it gets stored.
+        """
         RegistryCollector(corpus, registry, page_size=2).crawl(mode="full")
         captured = corpus.index.count_observations()
+        assert all(o.published_at is None for o in registry_observations(corpus, "a.example/mcp"))
 
         stats = backfill(corpus, registry).run(phases=("walk",))
 
-        # Two servers' latest versions were already in the corpus; only the two
-        # older versions of a.example are new.
-        assert stats.versions_skipped == 2
-        assert stats.versions_stored == 2
-        assert corpus.index.count_observations() == captured + 2
+        assert stats.versions_skipped == 0
+        assert stats.versions_stored == 4
+        assert corpus.index.count_observations() == captured + 4
+        # Every published version now carries its date, the newest included.
+        dated = {
+            o.published_at
+            for o in registry_observations(corpus, "a.example/mcp")
+            if o.published_at is not None
+        }
+        assert len(dated) == 3
+
+    def test_dating_a_captured_version_costs_no_new_blobs(self, corpus, registry):
+        RegistryCollector(corpus, registry, page_size=2).crawl(mode="full")
+        blobs_after_crawl = corpus.blobs.count()
+
+        backfill(corpus, registry).run(phases=("walk",))
+
+        # The content was already stored; only the pointer to it is new.
+        latest = [
+            o
+            for o in registry_observations(corpus, "a.example/mcp")
+            if o.published_at == from_iso(JULY).isoformat(timespec="microseconds")
+        ]
+        crawled = [
+            o for o in registry_observations(corpus, "a.example/mcp") if o.published_at is None
+        ]
+        assert latest[0].norm_sha == crawled[0].norm_sha
+        assert corpus.blobs.count() == blobs_after_crawl + 4  # the two older versions, raw + norm
+
+    def test_a_second_backfill_after_a_crawl_still_stores_nothing(self, corpus, registry):
+        RegistryCollector(corpus, registry, page_size=2).crawl(mode="full")
+        backfill(corpus, registry).run(phases=("walk",))
+        observations = corpus.index.count_observations()
+
+        stats = backfill(corpus, registry).run(phases=("walk",))
+
+        assert stats.versions_stored == 0
+        assert stats.versions_skipped == 4
+        assert corpus.index.count_observations() == observations
 
     def test_an_edit_to_an_already_published_version_is_counted_separately(self, corpus, registry):
         backfill(corpus, registry).run(phases=("walk",))
@@ -310,7 +353,12 @@ class TestVerify:
         stats = backfill(corpus, registry).run(phases=("verify",), resume=False)
 
         assert stats.verify_targets == 2
-        assert len(registry_observations(corpus, "a.example/mcp")) == 3
+        dated = {
+            o.published_at
+            for o in registry_observations(corpus, "a.example/mcp")
+            if o.published_at is not None
+        }
+        assert len(dated) == 3, "verify alone recovers the whole chain"
 
     def test_a_404_from_the_versions_endpoint_is_expected_not_fatal(self, corpus):
         reg = FakeRegistry(

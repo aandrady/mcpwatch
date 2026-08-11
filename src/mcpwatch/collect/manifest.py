@@ -315,9 +315,18 @@ class ManifestProber:
     def targets(self, limit: int | None = None) -> list[Target]:
         """Servers to probe: those the registry currently lists with an endpoint.
 
-        A server whose most recent Layer-1 observation is ``absent`` is excluded
-        — it is gone from the registry, so probing its old endpoint would be
-        both impolite and meaningless.
+        A server whose most recent Layer-1 observation is ``absent`` or
+        ``withdrawn`` is excluded — it is gone from the registry, so probing its
+        old endpoint would be both impolite and meaningless.
+
+        Ordered by ``observed_at``, deliberately, while the rest of the corpus
+        orders by ``effective_at``. The two answer different questions and this
+        one wants the retrieval order: "what did we last *learn* about this
+        server", not "what is the newest state it has ever been in". A backfill
+        reading a server's 2024 versions today learns nothing that should
+        outrank yesterday's live crawl, and a withdrawal dated to when the
+        registry flipped the flag must not be outranked by a successful crawl
+        that happened to be recorded a few hours later.
         """
         sql = """
             SELECT server_key, primary_endpoint FROM server
