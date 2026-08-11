@@ -17,6 +17,7 @@ systemctl --user enable --now \
     mcpwatch-registry-incremental.timer \
     mcpwatch-registry-full.timer \
     mcpwatch-manifest.timer \
+    mcpwatch-backup.timer \
     mcpwatch-health.timer
 
 echo
