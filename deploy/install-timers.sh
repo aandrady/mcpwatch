@@ -32,6 +32,7 @@ Linger must be on for these to fire without an active login:
 Useful commands:
     systemctl --user list-timers 'mcpwatch-*'
     systemctl --user start mcpwatch-manifest.service      # run one now
+    systemctl --user start mcpwatch-backfill.service      # WP5, one-shot, no timer
     journalctl --user -u mcpwatch-manifest.service -n 50  # last run's output
     systemctl --user list-units --failed                  # a failed health check shows here
     uv run python -m mcpwatch.health                      # check right now

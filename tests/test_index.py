@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mcpwatch.store import Layer, ObservationIndex, ObservationStatus
+from mcpwatch.store import Layer, ObservationIndex, ObservationStatus, StoreError
 
 SHA = "a" * 64
 
@@ -68,6 +68,88 @@ class TestSchema:
         second = ObservationIndex(path)
         assert second.count_observations() == 0
         second.close()
+
+
+V1_SCHEMA = """
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE run (
+    run_id TEXT PRIMARY KEY, collector TEXT NOT NULL, collector_version TEXT NOT NULL,
+    started_at TEXT NOT NULL, finished_at TEXT, stats_json TEXT
+);
+CREATE TABLE server (
+    server_key TEXT PRIMARY KEY, registry_name TEXT NOT NULL, repo_url TEXT,
+    primary_endpoint TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+);
+CREATE TABLE server_identity (
+    identity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_key TEXT NOT NULL REFERENCES server(server_key), observed_at TEXT NOT NULL,
+    registry_name TEXT NOT NULL, repo_url TEXT, primary_endpoint TEXT
+);
+CREATE TABLE observation (
+    obs_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES run(run_id),
+    server_key TEXT NOT NULL REFERENCES server(server_key),
+    layer TEXT NOT NULL, observed_at TEXT NOT NULL, status TEXT NOT NULL,
+    raw_sha TEXT, norm_sha TEXT, norm_version INTEGER,
+    error_class TEXT, error_detail TEXT
+);
+INSERT INTO schema_meta VALUES('schema_version', '1');
+INSERT INTO run VALUES('r1', 'registry', '0.1.0', '2026-08-07T00:00:00.000000+00:00', NULL, NULL);
+INSERT INTO server VALUES(
+    'example.com/mcp', 'example.com/mcp', NULL, NULL,
+    '2026-08-07T00:00:00.000000+00:00', '2026-08-07T00:00:00.000000+00:00'
+);
+INSERT INTO observation(run_id, server_key, layer, observed_at, status, raw_sha, norm_sha,
+                        norm_version)
+VALUES('r1', 'example.com/mcp', 'registry', '2026-08-07T00:00:00.000000+00:00', 'ok',
+       'aaaa', 'bbbb', 1);
+"""
+
+
+class TestMigration:
+    """The corpus cannot be re-collected, so every migration must be additive."""
+
+    @pytest.fixture
+    def v1_database(self, tmp_path: Path) -> Path:
+        path = tmp_path / "index.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(V1_SCHEMA)
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_a_v1_corpus_gains_the_new_columns_without_losing_a_row(self, v1_database):
+        index = ObservationIndex(v1_database)
+        try:
+            assert index.schema_version == 2
+            assert index.count_observations() == 1
+            observation = index.observations("example.com/mcp")[0]
+            assert observation.raw_sha == "aaaa"
+            assert observation.published_at is None
+            # Nothing about the ordering of pre-existing data changes: with no
+            # publication date, the chronology key is the observation time.
+            assert observation.effective_at == observation.observed_at
+        finally:
+            index.close()
+
+    def test_migrating_twice_is_a_no_op(self, v1_database):
+        first = ObservationIndex(v1_database)
+        first.close()
+        second = ObservationIndex(v1_database)
+        try:
+            assert second.schema_version == 2
+            assert second.count_observations() == 1
+        finally:
+            second.close()
+
+    def test_a_corpus_from_a_newer_build_is_refused(self, v1_database):
+        conn = sqlite3.connect(v1_database)
+        conn.execute("UPDATE schema_meta SET value = '99' WHERE key = 'schema_version'")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(StoreError, match="refusing to open"):
+            ObservationIndex(v1_database)
 
     def test_required_indexes_exist(self, index):
         names = {
@@ -214,11 +296,14 @@ class TestServers:
             "https://elsewhere.example/mcp",
         ]
 
-    def test_touch_server_only_extends_last_seen(self, seeded):
+    def test_touch_server_widens_the_interval_and_leaves_identity_alone(self, seeded):
         seeded.touch_server("example.com/mcp", seen_at="2026-08-09T00:00:00.000000+00:00")
+        # Evidence from before first_seen widens the interval backwards; a
+        # backfill reading a 2026-01 version is evidence the server existed then.
         seeded.touch_server("example.com/mcp", seen_at="2026-01-01T00:00:00.000000+00:00")
         server = seeded.get_server("example.com/mcp")
         assert server.last_seen.startswith("2026-08-09")
+        assert server.first_seen.startswith("2026-01-01")
         assert server.repo_url == "https://github.com/example/mcp"
 
 

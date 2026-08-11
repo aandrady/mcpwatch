@@ -211,6 +211,30 @@ class Corpus:
             seen_at=to_iso(seen_at or utcnow()),
         )
 
+    def record_identity(
+        self,
+        *,
+        server_key: str,
+        registry_name: str,
+        repo_url: str | None = None,
+        primary_endpoint: str | None = None,
+        observed_at: datetime,
+    ) -> None:
+        """Append a historical identity tuple, leaving current identity alone.
+
+        For a caller reading a server's past versions: the tuple joins the
+        append-only identity history, but the ``server`` row keeps whatever the
+        latest version says. Requires the server to already exist.
+        """
+        with self.index.transaction():
+            self.index.record_identity(
+                server_key=server_key,
+                registry_name=registry_name,
+                repo_url=repo_url,
+                primary_endpoint=primary_endpoint,
+                observed_at=to_iso(observed_at),
+            )
+
     def get_server(self, server_key: str) -> ServerRecord | None:
         """Return a server by key, or None if it is not tracked."""
         return self.index.get_server(server_key)
@@ -226,6 +250,7 @@ class Corpus:
         document: JsonValue,
         raw_bytes: bytes | None = None,
         observed_at: datetime | None = None,
+        published_at: datetime | None = None,
         status: ObservationStatus = ObservationStatus.OK,
         error_class: str | None = None,
         error_detail: str | None = None,
@@ -241,7 +266,12 @@ class Corpus:
                 letting this be re-serialized from ``document``: the raw blob is
                 what makes a future normalization change replayable, and a
                 round-tripped copy has already lost whatever the parser dropped.
-            observed_at: When the observation was made. Defaults to now.
+            observed_at: When the observation was made. Defaults to now. This is
+                always the retrieval time, including for backfilled history —
+                the historical timestamp goes in ``published_at``.
+            published_at: When the registry published this state, for a record
+                that carries such a timestamp. Sets ``effective_at``, and with
+                it where this observation sits in the server's history.
             status: Normally ``OK``. ``NONDETERMINISTIC`` is the other legitimate
                 value — WP3's double probe still stores the manifest it got, it
                 just quarantines it from mutation statistics.
@@ -260,6 +290,7 @@ class Corpus:
         norm = canonical_bytes(document, self.policy)
         raw = raw_bytes if raw_bytes is not None else self._fallback_raw_bytes(document)
         moment = to_iso(observed_at or utcnow())
+        published = None if published_at is None else to_iso(published_at)
 
         with self.index.transaction():
             # Read the baseline under the write lock, so `changed` cannot be
@@ -280,8 +311,12 @@ class Corpus:
                 norm_version=self.policy.version,
                 error_class=error_class,
                 error_detail=error_detail,
+                published_at=published,
             )
-            self.index.touch_server(server_key, seen_at=moment)
+            # Widen the server's known interval by when this state was true, not
+            # by when we read about it: reading a 2024 version today is evidence
+            # the server existed in 2024.
+            self.index.touch_server(server_key, seen_at=published or moment)
             observation = self.index.get_observation(obs_id)
 
         if observation is None:  # pragma: no cover - the insert just succeeded
@@ -305,12 +340,18 @@ class Corpus:
         error_class: str | None = None,
         error_detail: str | None = None,
         observed_at: datetime | None = None,
+        published_at: datetime | None = None,
     ) -> Observation:
         """Append an observation for an attempt that produced no document.
 
         Failures are recorded, never skipped. A silent gap is indistinguishable
         from a server that was fine, and crawl reliability is itself a reported
         metric.
+
+        Also the write path for a *marker*: a state the registry asserts but
+        serves no document for, such as a withdrawal. Those carry a
+        ``published_at`` so they land in history at the moment they describe
+        rather than at the moment we read about them.
 
         Raises:
             ValueError: If ``status`` is ``OK``; a successful observation must
@@ -321,6 +362,7 @@ class Corpus:
             raise ValueError(msg)
 
         moment = to_iso(observed_at or utcnow())
+        published = None if published_at is None else to_iso(published_at)
         with self.index.transaction():
             obs_id = self.index.insert_observation(
                 run_id=run_id,
@@ -330,8 +372,9 @@ class Corpus:
                 status=status,
                 error_class=error_class,
                 error_detail=error_detail,
+                published_at=published,
             )
-            self.index.touch_server(server_key, seen_at=moment)
+            self.index.touch_server(server_key, seen_at=published or moment)
             observation = self.index.get_observation(obs_id)
 
         if observation is None:  # pragma: no cover - the insert just succeeded

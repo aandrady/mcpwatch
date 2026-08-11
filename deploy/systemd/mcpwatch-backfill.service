@@ -1,0 +1,26 @@
+[Unit]
+# Deliberately timer-less. This reads history that is already written down and
+# is not going anywhere, so it runs once, by hand:
+#     systemctl --user start mcpwatch-backfill.service
+# It is checkpointed and idempotent, so starting it again after a failure — or
+# months later, to pick up versions published since — resumes rather than
+# repeats.
+Description=MCPWatch Layer-1 retrospective backfill (one-shot)
+Documentation=https://github.com/L-Logix/mcpwatch
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+Environment=MCPWATCH_CONTACT=mcpwatch@iyre.com
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.collect.backfill
+
+CPUQuota=100%
+MemoryMax=1G
+Nice=10
+# ~9,000 polite requests. Generous, because being killed mid-flight costs a
+# checkpoint's worth of work and leaves an open run for the health check to
+# complain about — neither fatal, both avoidable.
+TimeoutStartSec=21600
