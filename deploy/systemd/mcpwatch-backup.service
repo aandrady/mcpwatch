@@ -1,0 +1,26 @@
+[Unit]
+Description=MCPWatch corpus backup
+Documentation=https://github.com/L-Logix/mcpwatch
+# Ordering only. The backup must run even if a collector failed — arguably
+# especially then.
+After=mcpwatch-manifest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+Environment=MCPWATCH_BACKUP=%h/mcpwatch-backup
+# Real copies, not hard links: a hard-linked mirror shares storage with the
+# original, so it protects against an accidental delete but not against the
+# disk that holds both. Blobs are content-addressed, so the copy is incremental
+# and a steady-state night moves almost nothing.
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.backup
+
+CPUQuota=100%
+MemoryMax=1G
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=7200
+
+# No [Install]: activated by its timer.
