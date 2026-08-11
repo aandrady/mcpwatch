@@ -3,7 +3,10 @@
 import json
 from datetime import timedelta
 
+import pytest
+
 from conftest import manifest as manifest_doc
+from mcpwatch.backup import backup_corpus
 from mcpwatch.health import check_corpus, main
 from mcpwatch.store import Layer, ObservationStatus, utcnow
 
@@ -18,6 +21,20 @@ def finished_run(corpus, collector, *, ago_hours=0.0, stats=None):
 
 def named(report, name):
     return next(c for c in report.checks if c.name == name)
+
+
+@pytest.fixture(autouse=True)
+def _backed_up(corpus, tmp_path, monkeypatch):
+    """Give every health test a real, fresh backup.
+
+    Backup health is checked against the environment, so without this every
+    test in this module would fail on the backup checks instead of on the thing
+    it is actually asserting. Tests that care about backup state override it.
+    """
+    dest = tmp_path / "health-backup"
+    monkeypatch.setenv("MCPWATCH_BACKUP", str(dest))
+    backup_corpus(corpus.root, dest)
+    return dest
 
 
 class TestFreshness:
@@ -187,3 +204,50 @@ class TestStaleRunWindow:
         corpus.start_run("manifest", "0.1.0", started_at=utcnow() - timedelta(days=2))
 
         assert not check_corpus(corpus).ok
+
+
+class TestBackupHealth:
+    def test_a_missing_backup_is_unhealthy(self, corpus, tmp_path, monkeypatch):
+        """645MB of non-reconstructible corpus with no copy is not 'healthy'."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        monkeypatch.setenv("MCPWATCH_BACKUP", str(tmp_path / "nowhere"))
+
+        report = check_corpus(corpus)
+
+        assert not report.ok
+        assert named(report, "backup.present").ok is False
+
+    def test_a_stale_backup_is_caught(self, corpus, monkeypatch, _backed_up):
+        """The failure that costs the corpus: backups that quietly stopped."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        payload = json.loads((_backed_up / "manifest.json").read_text())
+        payload["created_at"] = (utcnow() - timedelta(hours=72)).isoformat()
+        (_backed_up / "manifest.json").write_text(json.dumps(payload))
+
+        report = check_corpus(corpus)
+
+        assert not report.ok
+        assert named(report, "backup.freshness").ok is False
+
+    def test_an_unverified_backup_is_not_healthy(self, corpus, monkeypatch, _backed_up):
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        payload = json.loads((_backed_up / "manifest.json").read_text())
+        payload["verified"] = False
+        (_backed_up / "manifest.json").write_text(json.dumps(payload))
+
+        report = check_corpus(corpus)
+
+        assert not report.ok
+        assert named(report, "backup.verified").ok is False
+
+    def test_a_fresh_verified_backup_passes(self, corpus):
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+
+        report = check_corpus(corpus)
+
+        assert report.ok
+        assert named(report, "backup.verified").ok is True

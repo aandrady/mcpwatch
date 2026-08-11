@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, from_iso, to_iso, utcnow
@@ -41,6 +41,14 @@ the crawler broke, not that the ecosystem did.
 
 MAX_NONDETERMINISTIC_RATIO = 0.10
 """Above this, suspect our own normalization before blaming the servers."""
+
+MAX_BACKUP_AGE_HOURS = 36.0
+"""How stale the newest verified backup may be.
+
+Matches the collectors' own freshness window: the backup runs nightly, so 36h
+tolerates one missed night while still catching a backup that has quietly
+stopped — which is the failure that would cost the whole corpus.
+"""
 
 STALE_RUN_WINDOW = timedelta(days=7)
 """How far back to look for cycles that died mid-run.
@@ -161,7 +169,46 @@ def check_corpus(corpus: Corpus) -> HealthReport:
         not missing,
         f"{len(missing)} referenced blob(s) missing from the store",
     )
+    _check_backup(report, now)
     return report
+
+
+def _check_backup(report: HealthReport, now: datetime) -> None:
+    """Confirm a recent backup exists *and* verified.
+
+    Checked here rather than trusted to the backup unit's own exit status,
+    because the failure that actually costs the project is a backup that
+    silently stopped running weeks ago. An unverified backup counts as no
+    backup: the corpus cannot be re-collected, so "probably fine" is not a
+    state worth reporting as healthy.
+    """
+    root = Path(os.environ.get("MCPWATCH_BACKUP", str(Path.home() / "mcpwatch-backup")))
+    manifest = root / "manifest.json"
+    if not manifest.is_file():
+        report.add("backup.present", False, f"no backup manifest at {manifest}")
+        return
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        report.add("backup.present", False, f"unreadable backup manifest: {exc}")
+        return
+
+    created = payload.get("created_at")
+    age_hours = (
+        (now - from_iso(created)).total_seconds() / 3600 if isinstance(created, str) else None
+    )
+    report.add(
+        "backup.freshness",
+        age_hours is not None and age_hours <= MAX_BACKUP_AGE_HOURS,
+        f"last backup {age_hours:.1f}h ago (limit {MAX_BACKUP_AGE_HOURS:.0f}h)"
+        if age_hours is not None
+        else "backup manifest has no timestamp",
+    )
+    report.add(
+        "backup.verified",
+        bool(payload.get("verified")),
+        str(payload.get("verify_detail", "no verification detail recorded")),
+    )
 
 
 def _check_coverage(corpus: Corpus, report: HealthReport) -> None:

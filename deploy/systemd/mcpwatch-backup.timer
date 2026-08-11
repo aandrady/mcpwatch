@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly MCPWatch corpus backup
+
+[Timer]
+# After the manifest cycle (03:30 + ~40min) has had time to finish, and before
+# the 06:00 health check, so a failed backup is visible in the same sweep.
+OnCalendar=*-*-* 05:15:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
