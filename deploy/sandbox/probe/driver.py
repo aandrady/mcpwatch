@@ -245,7 +245,7 @@ class StdioSession:
                 self.process.stdin.close()
             self.process.terminate()
             self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired, OSError:
+        except (subprocess.TimeoutExpired, OSError):
             self.process.kill()
 
 
