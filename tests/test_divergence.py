@@ -256,6 +256,30 @@ class TestObservedProfile:
         assert Capability.FILESYSTEM_WRITE in profile
         assert Capability.FILESYSTEM_READ not in profile
 
+    def test_a_resolver_read_is_not_filesystem_access(self):
+        # /etc/hosts is opened by the C resolver on every name lookup. In the
+        # first real run this was 27 of 29 undeclared_filesystem findings — the
+        # network access double-counted under a second class.
+        trace = '1010.0 openat(AT_FDCWD, "/etc/hosts", O_RDONLY) = 3'
+        profile = observed_profile(parse_strace(trace), [], (1009.0, 1011.0))
+        assert Capability.FILESYSTEM_READ not in profile
+
+    def test_a_trust_store_read_is_not_filesystem_access(self):
+        trace = '1010.0 openat(AT_FDCWD, "/etc/ssl/certs/ca.pem", O_RDONLY) = 3'
+        profile = observed_profile(parse_strace(trace), [], (1009.0, 1011.0))
+        assert Capability.FILESYSTEM_READ not in profile
+
+    def test_a_write_to_a_resolver_file_is_still_a_write(self):
+        # Reading /etc/hosts is plumbing; rewriting it is not.
+        trace = '1010.0 openat(AT_FDCWD, "/etc/hosts", O_WRONLY) = 3'
+        profile = observed_profile(parse_strace(trace), [], (1009.0, 1011.0))
+        assert Capability.FILESYSTEM_WRITE in profile
+
+    def test_an_interesting_etc_read_still_counts(self):
+        trace = '1010.0 openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = 3'
+        profile = observed_profile(parse_strace(trace), [], (1009.0, 1011.0))
+        assert Capability.FILESYSTEM_READ in profile
+
     def test_runtime_library_reads_are_filtered_out(self):
         profile = observed_profile(parse_strace(TRACE), [], (1000.0, 1000.5))
         assert Capability.FILESYSTEM_READ not in profile

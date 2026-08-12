@@ -74,6 +74,33 @@ is background; a process writing outside its scratch space or running another
 program is not.
 """
 
+_RESOLVER_FILES = frozenset(
+    {
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/services",
+        "/etc/protocols",
+        "/etc/networks",
+        "/etc/hostname",
+        "/etc/ssl/openssl.cnf",
+    }
+)
+"""Files read *because* a connection was made, not as filesystem access.
+
+The C resolver opens ``/etc/hosts`` and ``/etc/resolv.conf`` on every name
+lookup, and TLS reads a trust store. Counting those as filesystem capability
+attributed a second, spurious finding to every tool that touched the network:
+in the first real run, 27 of 29 `undeclared_filesystem` findings were
+``opened /etc/hosts`` and nothing else. The network access is already reported
+on its own; this would have been the same fact, double-counted, inflating a
+headline rate.
+
+Reads only. A *write* to any of these is not resolver plumbing.
+"""
+
+_CERTIFICATE_PREFIX = ("/etc/ssl/", "/etc/pki/", "/etc/ca-certificates", "/usr/share/ca-")
+"""Trust stores, read by TLS for the same reason and filtered for it."""
+
 _CREDENTIAL_PATH = re.compile(
     r"(/\.aws/|/\.ssh/|/\.netrc|/\.npmrc|/\.docker/config|/\.git-credentials|"
     r"/\.config/gcloud|/\.kube/config|/\.gnupg/|/\.pypirc|(^|/)\.env(\.|$)|"
@@ -143,7 +170,12 @@ def parse_sinkhole(records: list[dict[str, Any]]) -> list[tuple[float, str]]:
 
 
 def _is_noise(path: str) -> bool:
-    return path.startswith(_NOISE_PREFIX)
+    """Whether a *read* of this path carries any signal."""
+    return (
+        path.startswith(_NOISE_PREFIX)
+        or path in _RESOLVER_FILES
+        or path.startswith(_CERTIFICATE_PREFIX)
+    )
 
 
 def observed_profile(
