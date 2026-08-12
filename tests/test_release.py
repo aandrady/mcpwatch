@@ -317,3 +317,31 @@ class TestConcentration:
         assert payload["largest_publisher"] == "io.github.fleet"
         assert payload["largest_publisher_share"] == pytest.approx(50 / 51, abs=1e-3)
         assert payload["friction_ratio_excluding_largest"] == pytest.approx(0.0)
+
+
+class TestPublishedDirectoryNamesNobody:
+    """Everything `build` writes lands in a directory a host serves wholesale."""
+
+    def test_per_server_findings_are_stripped_from_the_published_metrics(self):
+        from mcpwatch.release.cli import _publishable
+
+        raw = {
+            "divergence_rate": 0.31,
+            "by_class": {"undeclared_network": 22},
+            "findings": [{"server_key": "io.github.someone/mcp", "tool": "t"}],
+        }
+        published = _publishable(raw)
+        assert published is not None
+        assert "findings" not in published
+        assert "io.github.someone/mcp" not in json.dumps(published)
+
+    def test_the_aggregate_figures_survive_stripping(self):
+        from mcpwatch.release.cli import _publishable
+
+        published = _publishable({"divergence_rate": 0.31, "ci95": [0.2, 0.4], "findings": []})
+        assert published == {"divergence_rate": 0.31, "ci95": [0.2, 0.4]}
+
+    def test_no_divergence_run_stays_none(self):
+        from mcpwatch.release.cli import _publishable
+
+        assert _publishable(None) is None

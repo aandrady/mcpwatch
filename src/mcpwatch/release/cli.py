@@ -36,6 +36,36 @@ def _changesets(corpus: Corpus, layer: Layer) -> list[ChangeSet]:
     return list(DiffEngine(corpus).changesets(layer=layer))
 
 
+PUBLISHABLE_DIVERGENCE_KEYS = (
+    "servers_exercised",
+    "tools_exercised",
+    "tools_skipped",
+    "tools_unexercised",
+    "diverging_tools",
+    "divergence_rate",
+    "ci95",
+    "by_class",
+    "skip_reasons",
+    "launch_failures",
+    "caveats",
+)
+"""Divergence fields safe to write into the published directory.
+
+`findings` is deliberately absent: it carries a `server_key` per finding, and
+naming a server is gated on coordinated disclosure. Everything `build` writes
+lands in one directory that a static host serves wholesale, so a file in it is
+published whether or not the dashboard links to it — which is exactly how a name
+leaks without anyone deciding to publish it.
+"""
+
+
+def _publishable(divergence: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Strip per-server detail from a divergence run's stats."""
+    if divergence is None:
+        return None
+    return {k: v for k, v in divergence.items() if k in PUBLISHABLE_DIVERGENCE_KEYS}
+
+
 def _latest_divergence(corpus: Corpus) -> dict[str, Any] | None:
     """The most recent WP9 run's stats, if one has been recorded."""
     row = corpus.index.connection.execute(
@@ -139,7 +169,7 @@ def _build(args: argparse.Namespace) -> int:
                     "layer": str(pin_layer),
                     "policies": [o.as_json() for o in outcomes],
                 },
-                "divergence": divergence,
+                "divergence": _publishable(divergence),
             },
             indent=2,
             sort_keys=True,
@@ -150,7 +180,7 @@ def _build(args: argparse.Namespace) -> int:
 
     print(f"wrote {out / 'index.html'}")
     print(f"wrote {out / 'DATASHEET.md'}")
-    print(f"wrote {out / 'metrics.json'}")
+    print(f"wrote {out / 'metrics.json'} (aggregate only — no server is named)")
     print()
     print(
         pinning.render(
