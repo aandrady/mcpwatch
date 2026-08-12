@@ -175,8 +175,15 @@ so it has to measure them and not us.
 **Already a finding:** 7 of 20 servers opened network connections while merely listing their
 tools. Nothing about enumeration requires egress. The sinkhole is what makes that sayable.
 
-Not yet scheduled: a full 400-member cycle should be observed end to end before a timer runs it
-unattended.
+**Not yet scheduled, on purpose.** `mcpwatch-sandbox.timer` (07:00 UTC, clear of the manifest
+probe, the backup and the health check) is installed by `deploy/install-timers.sh` but left
+disabled. This is the only unit that executes untrusted third-party code, and it should not begin
+running unattended on the strength of a passing test suite. Enable it once a full cycle has been
+watched end to end:
+
+```
+systemctl --user enable --now mcpwatch-sandbox.timer
+```
 
 ### Wave 4 — Outputs (after ≥3 months of observation)
 
