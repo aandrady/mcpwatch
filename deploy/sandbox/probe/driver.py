@@ -309,10 +309,21 @@ class StdioSession:
 
 
 def probe_once(command: list[str], env: dict[str, str]) -> tuple[dict, str]:
-    """One launch, one manifest. Returns the manifest and the stderr tail."""
+    """One launch, one manifest. Returns the manifest and the stderr tail.
+
+    A failure carries the server's stderr out with it. "exited with code 1" on
+    its own says nothing about whether the server wanted a credential, a network
+    it no longer has, or a newer runtime, and that distinction is the whole
+    point of reporting a failure taxonomy rather than a success rate.
+    """
     session = StdioSession(command, env)
     try:
         return session.collect(), session.stderr_tail()
+    except Failed as exc:
+        tail = session.stderr_tail().strip()
+        if tail:
+            exc.detail = f"{exc.detail}; server said: {tail[-1200:]}"
+        raise
     finally:
         session.close()
 
@@ -340,11 +351,29 @@ def build_env(spec: dict, *, placeholders: bool) -> dict[str, str]:
 COMMAND_FILE = "/srv/probe/launch.json"
 """Where the install phase leaves the command the probe phase will run.
 
-The two phases are separate ``docker exec`` calls into one container, because
-between them the runner swaps the container off the egress network and onto the
-sinkhole. Install needs a package registry; the server it installed must never
-have one.
+The phases run in two different containers — install needs a package registry
+and the server it installed must never have one — and the second is committed
+from the first, so this file travels with the filesystem.
 """
+
+
+CREDENTIAL_HINTS = ("api key", "api_key", "token", "credential", "unauthor", "must be set")
+"""Phrases a server uses when what it is missing is a secret.
+
+Checked against the server's own stderr after a placeholder launch has already
+failed. Coarse on purpose: this separates `requires_credentials` from `crashed`
+in the reported taxonomy, and over-calling it would understate real breakage,
+so it fires only when a placeholder was already tried and rejected.
+"""
+
+
+def _credentials_wanted(spec: dict, detail: str) -> bool:
+    """Whether a failure is best explained by a credential we will never supply."""
+    declared = spec.get("environment_variables") or []
+    if not any(item.get("isSecret") or item.get("isRequired") for item in declared):
+        return False
+    lowered = detail.casefold()
+    return any(hint in lowered for hint in CREDENTIAL_HINTS)
 
 
 def _install_phase(spec: dict) -> int:
@@ -385,6 +414,7 @@ def main() -> int:
         "used_placeholders": False,
     }
     started = time.monotonic()
+    used_placeholders = False
     try:
         # An explicit command in the spec wins, which is how the containment
         # test launches its canary without installing anything.
@@ -393,8 +423,6 @@ def main() -> int:
             with open(COMMAND_FILE, encoding="utf-8") as handle:
                 command = json.load(handle)
         result["command"] = command
-
-        used_placeholders = False
         try:
             first, stderr = probe_once(command, build_env(spec, placeholders=False))
         except Failed as bare:
@@ -412,7 +440,11 @@ def main() -> int:
         result["used_placeholders"] = used_placeholders
         result["stderr_tail"] = stderr
     except Failed as exc:
-        result["status"] = exc.klass
+        # A server that refuses to start without a real secret is a documented
+        # population, not breakage. It is only called that after an obviously
+        # fake placeholder was already offered and rejected.
+        wanted = used_placeholders and _credentials_wanted(spec, exc.detail)
+        result["status"] = "requires_credentials" if wanted else exc.klass
         result["detail"] = exc.detail[-STDERR_TAIL:]
     except OSError as exc:
         result["status"] = "install_failed"
