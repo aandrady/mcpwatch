@@ -297,7 +297,57 @@ systemctl --user enable --now mcpwatch-sandbox.timer
 
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
-| **10** | **Pinning retrospective, dashboard, dataset release** | Caught/friction ratio; public dashboard; versioned dataset | Reproducible from corpus |
+| **10** | **Pinning retrospective, dashboard, dataset release** — **[BUILT 2026-08-12]** | Friction ratio, metrics, datasheet, static dashboard | Met: every output reproducible from the corpus with no network access |
+
+**The framing was written first.** `FRAMING.md` states how results are to be reported — no base
+rates from anecdotes, the friction ratio reported prominently even when unflattering to pinning,
+proxies never presented as ground truth, nothing named without coordinated disclosure — and was
+committed *before* the analysis code that produces the numbers, so a finding cannot bend it
+retroactively. Git history is the evidence of that ordering.
+
+### A. Pinning retrospective — the actionable output
+
+Replaying the corpus against five hypothetical content-hash pinning policies. Two accounting
+decisions determine the answer and both are stated rather than buried: **a version bump counts as
+a block**, because not receiving the new version automatically is precisely what pinning does;
+and **security relevance is WP6's severity flags, not adjudicated labels**, since WP7's κ gate is
+unmet. Treating every flag as security-relevant is an upper bound on the benefit, which makes
+every friction ratio a *lower* bound on the cost. Both directions flatter pinning.
+
+**Manifest layer** (2,772 transitions, 5 days):
+
+| Policy | Blocked | Passed | Caught | Friction/catch | High-signal only |
+|---|---:|---:|---:|---:|---:|
+| whole_manifest | 2,772 | 0 | 995 | 1.8 | 2.4 |
+| per_tool | 2,704 | 68 | 927 | 1.9 | 2.4 |
+| description_exempt | 2,698 | 74 | 985 | 1.7 | 2.3 |
+| additive_exempt | 2,690 | 82 | 924 | 1.9 | 2.4 |
+| permissive | 2,579 | 193 | 884 | 1.9 | 2.3 |
+
+Relaxing the policy barely helps: the most permissive variant still blocks 93% of transitions.
+**Registry layer** (49,194 transitions, 337 days): every variant is identical at 4.5 friction per
+catch, because the variants exempt tool-level changes and a registry transition is a
+republication — 99.8% of which bump the version, which no pinning policy exempts.
+
+> **Concentration warning, and it is the most important caveat here.** 70% of everything pinning
+> "caught" (694 of 995) came from a *single publisher* rolling one `claim_token` parameter across
+> 684 of its own servers inside the observation window. Publishers are not independent samples,
+> and a naive count reads one operational event as 684 catches. Excluding that publisher the
+> ratio is 1.4 rather than 1.8. The replay now reports this automatically above a 20% share.
+
+### B–D. Metrics, datasheet, dashboard
+
+Every figure is paired with the population it does not cover: 3,177 servers requiring credentials
+never probed, 436 quarantined as nondeterministic, 780 unreachable — a 48.5% reachable rate that
+describes our access, not the ecosystem. Layer 1 and Layer 2 are never averaged, and no Layer-2
+rate is annualised.
+
+The dashboard is one self-contained HTML file — no scripts, no external requests — and **names no
+server anywhere**. Two disclosure leaks were caught and closed during the build: `metrics.json`
+was written into the same served directory carrying a `server_key` per divergence finding, and
+the pinning block named the concentrated publisher beside a column headed "caught". The published
+metrics are now aggregate-only via an allowlist, so a field added later is withheld by default
+rather than leaking by default.
 
 ---
 
@@ -326,7 +376,8 @@ Weeks 2-4 ├─ WP6 diff engine   ─┐ built and calibrated against
 Weeks 4-12├─ WP8 sandbox    [DONE 2026-08-12, 400/400, containment verified]
           ├─ WP9 divergence [DONE 2026-08-12, validated; 31.2% of exercised tools diverge]
           └─ (observation window running continuously)
-Month 4+  └─ WP10 pinning retrospective, dashboard, release
+Month 4+  └─ WP10 [BUILT 2026-08-12] pinning retrospective, dashboard, datasheet
+             (machinery complete; Layer-2 figures preliminary until the window matures)
 ```
 
 **Minimum publishable result** shifts earlier than the plan assumed: Layer 1 retrospective analysis is a genuine first-of-its-kind measurement available in weeks. Layer 2 tool-level data remains the headline contribution at month 4+.
