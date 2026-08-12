@@ -336,6 +336,63 @@ class TestLaunchArguments:
         assert self.driver._preferred_bin(spec) is None
 
 
+# ------------------------------------------------------- failure classifier ---
+
+
+class TestFailureClassifier:
+    """Read off the server's own stderr, measured against the first full cycle."""
+
+    def setup_method(self):
+        self.driver = _load_driver()
+
+    def test_an_unpinned_sdk_that_moved_is_its_own_class(self):
+        # 26 of 400 sampled servers failed on exactly this: an unpinned
+        # dependency on the MCP SDK, which released 2.0 and moved the module.
+        klass, undeclared = self.driver.classify_failure(
+            {}, "crashed", "ModuleNotFoundError: No module named 'mcp.server.fastmcp'"
+        )
+        assert klass == "dependency_broken"
+        assert undeclared is False
+
+    def test_a_node_module_resolution_failure_counts_too(self):
+        klass, _ = self.driver.classify_failure({}, "crashed", "Error: Cannot find module 'zod'")
+        assert klass == "dependency_broken"
+
+    def test_a_declared_credential_is_requires_credentials(self):
+        spec = {"environment_variables": [{"name": "API_KEY", "isSecret": True}]}
+        klass, undeclared = self.driver.classify_failure(
+            spec, "crashed", "Error: API_KEY environment variable is required"
+        )
+        assert klass == "requires_credentials"
+        assert undeclared is False
+
+    def test_an_undeclared_credential_is_flagged_as_such(self):
+        # The server demands a variable its published record never mentions, so
+        # a consumer reading the registry could not know it was needed.
+        klass, undeclared = self.driver.classify_failure(
+            {}, "crashed", "Error: PERPLEXITY_API_KEY environment variable is required"
+        )
+        assert klass == "requires_credentials"
+        assert undeclared is True
+
+    def test_a_dependency_failure_wins_over_a_credential_mention(self):
+        # An import error means it never got far enough to want a credential.
+        klass, _ = self.driver.classify_failure(
+            {},
+            "crashed",
+            "ModuleNotFoundError: No module named 'mcp'\nhint: set API_KEY",
+        )
+        assert klass == "dependency_broken"
+
+    def test_an_unexplained_crash_stays_a_crash(self):
+        assert self.driver.classify_failure({}, "crashed", "Segmentation fault")[0] == "crashed"
+
+    def test_classes_decided_earlier_are_left_alone(self):
+        # install_failed and timeout are decided by what happened, not by text.
+        for klass in ("install_failed", "timeout", "launch_failed"):
+            assert self.driver.classify_failure({}, klass, "no module named x")[0] == klass
+
+
 # ------------------------------------------------------------------ sinkhole ---
 
 

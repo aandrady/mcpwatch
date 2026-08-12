@@ -146,7 +146,7 @@ does mean the gate rests almost entirely on the human labels.
 
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
-| **8** | **Package-server sandbox enumeration** — **[BUILT 2026-08-12]** | Docker harness + **400-server stratified sample** drawn from a frame of 9,197 | Met: 7/7 containment properties verified against a live exfiltrating canary; sampling frame documented and seeded |
+| **8** | **Package-server sandbox enumeration** — **[DONE 2026-08-12]** | Docker harness + **400-server stratified sample** from a frame of 9,197; first full cycle **230 enumerated, 3,888 tools** | Met: 7/7 containment properties verified against a live exfiltrating canary; frame documented and seeded; coverage reported against the sample |
 | **9** | **Description-behavior divergence** | Instrumented execution; declared vs. observed capability diff | Instrumentation validated on known-behavior servers |
 
 **WP8's containment gate is green.** `python -m mcpwatch.sandbox verify` runs a
@@ -165,15 +165,50 @@ two different Layer-2 manifests for one `server_key` would manufacture a mutatio
 needing their own install toolchains; OCI in particular means running a publisher's image rather
 than our hardened one, which is a different containment posture and deserves its own gate.
 
-**Validation, 20 servers:** 16 enumerated (1–121 tools each), 3 crashed, 1 `requires_credentials`.
-The first attempt returned 3 of 20, and closing that gap was three bugs in our launcher rather
-than a property of the ecosystem — npm bin names resolved from `package.json` instead of guessed
-from the identifier, PyPI installed into a venv so console scripts exist, and the 9.7% of servers
-that declare `packageArguments` actually receiving them. A coverage number is a headline result,
-so it has to measure them and not us.
+**First full cycle, 2026-08-12: 400 of 400 members, 132 minutes, containment verified.**
 
-**Already a finding:** 7 of 20 servers opened network connections while merely listing their
-tools. Nothing about enumeration requires egress. The sinkhole is what makes that sayable.
+| Outcome | Servers | Share |
+|---|---:|---:|
+| enumerated | 230 | 57.5% |
+| crashed | 123 | 30.8% |
+| `install_failed` | 30 | 7.5% |
+| `requires_credentials` | 8 | 2.0% |
+| `timeout` | 4 | 1.0% |
+| `launch_failed` | 3 | 0.8% |
+| `protocol_error` | 2 | 0.5% |
+
+230 servers yielded 3,888 tools, mean 16.9 each. **Zero nondeterministic** — no server's two
+launches disagreed, against 7.7% quarantined on the HTTP side, which is itself worth reporting:
+the stdio population does not embed session ids or randomize tool order the way remote endpoints
+do.
+
+The first attempt at a 20-server validation set returned 3 of 20, and closing that gap was three
+bugs in our launcher rather than a property of the ecosystem — npm bin names resolved from
+`package.json` instead of guessed from the identifier, PyPI installed into a venv so console
+scripts exist, and the 9.7% of servers declaring `packageArguments` actually receiving them. A
+coverage number is a headline result, so it has to measure them and not us.
+
+### Three findings the sandbox produced on its first run
+
+**48 of 400 servers (12.0%) opened network connections while merely listing their tools.**
+Nothing about enumeration requires egress. The sinkhole is what makes this sayable rather than
+merely suspected — destinations were captured with TLS SNI intact.
+
+**26 of 400 (6.5%) fail on one identical cause:** `No module named 'mcp.server.fastmcp'`. These
+packages declare an unpinned dependency on the MCP SDK, which has since released 2.0 and moved
+that module. Verified by hand against a clean venv: `cisa-kev-mcp` declares `Requires: mcp` with
+no constraint, pip resolves `mcp 2.0.0`, and the import fails. A published, version-pinned server
+that no longer runs because its own dependency floated across a major release is exactly what a
+longitudinal observatory should be able to name, so it now has its own class,
+`dependency_broken`, rather than being buried in `crashed`.
+
+**36 crashes were servers demanding an environment variable their registry record never
+mentions.** A consumer reading the published metadata could not know it was needed. These are now
+classified `requires_credentials` on the server's own stderr regardless of what was declared, and
+the missing declaration is recorded on the observation.
+
+The last two are reclassifications, so the table above still shows them inside `crashed`; the
+next cycle reports them under their own headings.
 
 **Not yet scheduled, on purpose.** `mcpwatch-sandbox.timer` (07:00 UTC, clear of the manifest
 probe, the backup and the health check) is installed by `deploy/install-timers.sh` but left

@@ -211,13 +211,21 @@ def _record(corpus: Corpus, run_id: str, result: SandboxResult, stats: dict[str,
     stats[result.status] = stats.get(result.status, 0) + 1
 
     if not result.ok:
+        failure_detail = result.detail
+        if result.credentials_undeclared:
+            # A finding, not bookkeeping: the server demands a variable its
+            # published registry record never mentions, so a consumer reading
+            # that record could not know it was needed.
+            failure_detail = (
+                f"[credential not declared in the registry record] {failure_detail or ''}".strip()
+            )
         corpus.record_failure(
             run_id=run_id,
             server_key=result.server_key,
             layer=Layer.MANIFEST,
             status=_status_for(result.status),
             error_class=result.status,
-            error_detail=result.detail,
+            error_detail=failure_detail,
         )
         return
 
@@ -261,6 +269,9 @@ def _status_for(failure: str) -> ObservationStatus:
     return {
         "install_failed": ObservationStatus.UNREACHABLE,
         "launch_failed": ObservationStatus.UNREACHABLE,
+        # Installed, but cannot import what it needs. The enum stays coarse and
+        # `error_class` carries the precision, as it does for the HTTP prober.
+        "dependency_broken": ObservationStatus.UNREACHABLE,
         "timeout": ObservationStatus.TIMEOUT,
         "requires_credentials": ObservationStatus.AUTH_REQUIRED,
         "protocol_error": ObservationStatus.PROTOCOL_ERROR,
