@@ -628,8 +628,11 @@ class BackfillCollector:
                 if not row.active:
                     stats.non_active_rows += 1
                 if row.published_at is None:
+                    # A finding about the record, not a fault in the run: it is
+                    # stored, it just cannot be placed in history. Its own
+                    # counter says so; `errors_by_class` is for things that
+                    # went wrong on our side.
                     stats.missing_published_at += 1
-                    _count(stats.errors_by_class, "missing_published_at")
                 if self._store_version(row, run_id=run_id, stats=stats, already=already):
                     stored += 1
                 self.corpus.record_identity(
@@ -808,8 +811,13 @@ class BackfillCollector:
                 # Expected for a withdrawn server: the registry drops it from
                 # this endpoint while still serving it under include_deleted.
                 # The walk is that server's only source, and it already ran.
+                #
+                # Counted, but not as an error. `errors_by_class` decides the
+                # exit status, and 181 withdrawn servers answering exactly as
+                # documented is a finding about the ecosystem, not a fault in
+                # the run — the first production run marked the systemd unit
+                # failed over precisely this.
                 stats.verify_not_found += 1
-                _count(stats.errors_by_class, "versions_404")
                 return
             stats.verify_failed += 1
             _count(stats.errors_by_class, f"versions_http_{exc.status}")
@@ -943,7 +951,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
     print(json.dumps(stats.as_json(), indent=2, sort_keys=True))
-    return 2 if (stats.errors_by_class or stats.verify_failed) else 0
+
+    # Non-zero means the *run* went wrong, not that the ecosystem was untidy.
+    # A withdrawn server 404ing on `/versions` and a record the registry gave no
+    # publication date are both findings, reported in their own counters and
+    # deliberately not here: a unit that goes red for facts about the data is a
+    # unit whose red means nothing.
+    return 2 if (stats.errors_by_class or stats.verify_failed or stats.malformed) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

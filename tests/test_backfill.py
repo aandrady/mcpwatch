@@ -170,6 +170,7 @@ class TestWalk:
 
         assert stats.versions_stored == 1
         assert stats.missing_published_at == 1
+        assert stats.errors_by_class == {}, "a registry quirk is not a run failure"
         observation = registry_observations(corpus, "a.example/mcp")[0]
         assert observation.published_at is None
         # With nothing better, chronology falls back to when we read it.
@@ -388,7 +389,10 @@ class TestVerify:
 
         assert stats.verify_not_found == 1
         assert stats.verify_failed == 0
-        assert stats.errors_by_class == {"versions_404": 1}
+        # Counted where it belongs, and *not* as an error: the exit status is
+        # derived from errors_by_class, and a withdrawn server answering exactly
+        # as documented must not turn the systemd unit red.
+        assert stats.errors_by_class == {}
 
     def test_versions_we_hold_that_the_registry_dropped_are_counted(self, corpus, registry):
         backfill(corpus, registry).run(phases=("walk",))
