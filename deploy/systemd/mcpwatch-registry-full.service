@@ -1,6 +1,6 @@
 [Unit]
 Description=MCPWatch Layer-1 registry collector (full reconciliation)
-Documentation=https://github.com/L-Logix/mcpwatch
+Documentation=https://github.com/aandrady/mcpwatch
 After=network-online.target
 
 [Service]

@@ -1,7 +1,17 @@
 # MCPWatch
 
-Longitudinal observatory measuring how MCP server tool definitions mutate after publication.
-See `BUILD-PLAN.md` for the decomposition and `PROMPTS.md` for per-package briefs.
+Longitudinal observatory measuring how MCP server tool definitions mutate after publication —
+the "rug pull" threat, which has a taxonomy slot in the literature but no published field data.
+Not a scanner (MCP-Scan and MCP-Scanner already exist); the contribution is *time*.
+
+**Current state:** two layers collecting daily against the official MCP registry, plus a
+retrospective Layer-1 corpus backfilled from the registry's own version history —
+**71,850 published versions across 21,701 servers, 50,256 version transitions**. See
+[`retrospective-2026-08-12.md`](retrospective-2026-08-12.md) for what that history says, and
+`BUILD-PLAN.md` for the decomposition and `PROMPTS.md` for per-package briefs.
+
+Crawling is read-only and rate-limited, with a contact address in every User-Agent; the MCP
+client implements no code path that can call a tool. See *Ethics guardrails* in `BUILD-PLAN.md`.
 
 ## `mcpwatch.store` — the storage foundation (WP1)
 

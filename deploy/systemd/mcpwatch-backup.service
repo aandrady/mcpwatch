@@ -1,6 +1,6 @@
 [Unit]
 Description=MCPWatch corpus backup
-Documentation=https://github.com/L-Logix/mcpwatch
+Documentation=https://github.com/aandrady/mcpwatch
 # Ordering only. The backup must run even if a collector failed — arguably
 # especially then.
 After=mcpwatch-manifest.service

@@ -6,7 +6,7 @@
 # months later, to pick up versions published since — resumes rather than
 # repeats.
 Description=MCPWatch Layer-1 retrospective backfill (one-shot)
-Documentation=https://github.com/L-Logix/mcpwatch
+Documentation=https://github.com/aandrady/mcpwatch
 After=network-online.target
 
 [Service]

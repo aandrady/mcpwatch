@@ -1,6 +1,6 @@
 [Unit]
 Description=MCPWatch Layer-2 live manifest prober
-Documentation=https://github.com/L-Logix/mcpwatch
+Documentation=https://github.com/aandrady/mcpwatch
 After=network-online.target
 # Ordering only, not a dependency: if the registry run fails, the manifest probe
 # must still go ahead against yesterday's target list. Layer-2 data cannot be

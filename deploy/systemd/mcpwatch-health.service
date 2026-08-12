@@ -1,6 +1,6 @@
 [Unit]
 Description=MCPWatch corpus health check
-Documentation=https://github.com/L-Logix/mcpwatch
+Documentation=https://github.com/aandrady/mcpwatch
 
 [Service]
 Type=oneshot
