@@ -147,7 +147,51 @@ does mean the gate rests almost entirely on the human labels.
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
 | **8** | **Package-server sandbox enumeration** — **[DONE 2026-08-12]** | Docker harness + **400-server stratified sample** from a frame of 9,197; first full cycle **230 enumerated, 3,888 tools** | Met: 7/7 containment properties verified against a live exfiltrating canary; frame documented and seeded; coverage reported against the sample |
-| **9** | **Description-behavior divergence** | Instrumented execution; declared vs. observed capability diff | Instrumentation validated on known-behavior servers |
+| **9** | **Description-behavior divergence** — **[BUILT 2026-08-12]** | Declared-vs-observed capability diff over instrumented execution | Met: harness validated against three known-behaviour fixtures; no egress escapes the sinkhole |
+
+**WP9 is the one place in MCPWatch that invokes a third party's tool.** Everything else is
+read-only by construction — `mcpwatch.collect.mcp` and WP8's `driver.py` have no code path to
+`tools/call`, so no misconfiguration can make the nightly collectors call one. The capability
+lives in `deploy/sandbox/probe/exercise.py`, run by a separate command, imported by nothing the
+scheduler touches. It is deliberately **not** on a timer: the brief scopes WP9 to a sampled
+method contribution, not continuous collection.
+
+**The exercise protocol**, which the ethics section rests on. Four exclusions, in order: a
+`destructiveHint` or `readOnlyHint: false` annotation is believed and the tool skipped; a
+destructive verb family in the name or opening sentence excludes; a required parameter that
+cannot be synthesised excludes, because guessing is how you invoke `transfer(amount,
+destination)` with something plausible; and a 10-tool budget per server stops one 121-tool server
+dominating the rate. Arguments are inert and traceable — hosts use the reserved `.invalid` TLD,
+credentials are obviously fake, paths stay inside the container's own tmpfs. The containment does
+the safety work; these rules are defence in depth on top of it.
+
+**Both halves are biased toward silence.** Declared extraction is generous — a tool named
+`fetch_url` has declared network access with an empty description, and a `url` parameter is a
+declaration whatever the prose says — so an ambiguous description resolves toward *declared* and
+the divergence goes unreported. Scoring is one-directional: observed-and-not-declared is a
+finding, the reverse never is, because a tool invoked once with synthetic arguments on one code
+path has not been shown to be incapable of anything. Both push the measured rate down, which is
+the direction a first-of-its-kind number should be wrong in.
+
+**Observation is windowed per tool call.** Without windows the measurement includes server
+startup — hundreds of library opens and a `resolv.conf` read — and reports a ~100% divergence
+rate that means nothing. `strace` is primary because it sees a syscall whether or not it
+succeeded, which matters when every connection is being refused by the sinkhole on purpose; the
+sinkhole corroborates with a destination and TLS SNI, and `docker diff` corroborates writes.
+
+**The validation gate passes, 2026-08-12.** Three fixtures with known behaviour, asserted exactly
+in both directions:
+
+| Fixture | Declares | Does | Result |
+|---|---|---|---|
+| `honest` | network + file read | exactly that | no findings — correct |
+| `deceptive` | "pure local text transformation" | network, subprocess, credential path, file write | all four detected — correct |
+| `inert` | nothing | nothing | no findings — correct |
+
+`honest` and `inert` are as load-bearing as `deceptive`: a harness that flags everything detects
+nothing, and startup noise attributed to whichever tool ran first would surface there or nowhere.
+`run` re-runs this gate before every measurement, for the same reason WP8's probe re-verifies
+containment — an instrument not just checked against a known answer is not an instrument.
 
 **WP8's containment gate is green.** `python -m mcpwatch.sandbox verify` runs a
 deliberately-exfiltrating canary in a real probe container and checks seven properties: the
@@ -250,7 +294,8 @@ Week 1    ├─ [DONE] VPS provisioned & verified — ssh mcpwatch
 Week 2    ├─ WP5 backfill (instant historical corpus)                [DONE 2026-08-11]
 Weeks 2-4 ├─ WP6 diff engine   ─┐ built and calibrated against
           └─ WP7 classifier    ─┘ real backfilled mutations
-Weeks 4-12├─ WP8 sandbox        [BUILT 2026-08-12, containment verified] → WP9 divergence
+Weeks 4-12├─ WP8 sandbox    [DONE 2026-08-12, 400/400, containment verified]
+          ├─ WP9 divergence [BUILT 2026-08-12, harness validated on known-behaviour fixtures]
           └─ (observation window running continuously)
 Month 4+  └─ WP10 pinning retrospective, dashboard, release
 ```
