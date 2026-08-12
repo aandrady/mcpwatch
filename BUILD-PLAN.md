@@ -147,7 +147,7 @@ does mean the gate rests almost entirely on the human labels.
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
 | **8** | **Package-server sandbox enumeration** — **[DONE 2026-08-12]** | Docker harness + **400-server stratified sample** from a frame of 9,197; first full cycle **230 enumerated, 3,888 tools** | Met: 7/7 containment properties verified against a live exfiltrating canary; frame documented and seeded; coverage reported against the sample |
-| **9** | **Description-behavior divergence** — **[BUILT 2026-08-12]** | Declared-vs-observed capability diff over instrumented execution | Met: harness validated against three known-behaviour fixtures; no egress escapes the sinkhole |
+| **9** | **Description-behavior divergence** — **[DONE 2026-08-12]** | Declared-vs-observed capability diff; first measurement **31.2% of tools (95% CI 22.2-42.1%)** | Met: harness validated against three known-behaviour fixtures; no egress escapes the sinkhole; rate reported with sample-size and selection-bias caveats |
 
 **WP9 is the one place in MCPWatch that invokes a third party's tool.** Everything else is
 read-only by construction — `mcpwatch.collect.mcp` and WP8's `driver.py` have no code path to
@@ -192,6 +192,35 @@ in both directions:
 nothing, and startup noise attributed to whichever tool ran first would surface there or nowhere.
 `run` re-runs this gate before every measurement, for the same reason WP8's probe re-verifies
 containment — an instrument not just checked against a known answer is not an instrument.
+
+### First measurement, 2026-08-12 — 10 servers, 80 tools
+
+**31.2% of exercised tools did something their description did not mention** (25/80, 95% CI
+22.2%–42.1%), across two classes:
+
+| Class | Tools |
+|---|---:|
+| `undeclared_network` | 22 |
+| `undeclared_filesystem` | 3 |
+
+The headline shape: **tools presented as local computation that are in fact API clients.**
+`calculate_adx` describes itself as "Calculates the Average Directional Movement Index (ADX) for
+a given equity" and calls `www.alphavantage.co`. The pattern repeats across that server's tool
+family and at `api.canva.com`, `api.figma.com`, `www.googleapis.com` and `db.dstore.one`. Nothing
+in those descriptions or schemas tells a reader the tool leaves the machine.
+
+**284 tools were skipped** and that has to be read alongside the rate: 179 over the 10-tool
+per-server budget, and the rest excluded by the protocol — 14 `update`, 13 `create`, 8 declaring
+`destructiveHint`, 7 `delete`, 6 `upload`. One server timed out before it could be exercised, and
+its 3 selected tools are counted as unexercised rather than as zero divergence.
+
+> **The first version of this number was 45.0%, and it was wrong.** 27 of its 29
+> `undeclared_filesystem` findings were `opened /etc/hosts` — the C resolver performing a name
+> lookup, which is a consequence of network access that was already being reported on its own.
+> The same fact, counted twice, under a class it does not belong to. Resolver files and TLS trust
+> stores are now noise for *reads* only; rewriting `/etc/hosts` is still a write and reading
+> `/etc/passwd` is still a finding, both pinned by tests. The network findings from that run were
+> unaffected and stand.
 
 **WP8's containment gate is green.** `python -m mcpwatch.sandbox verify` runs a
 deliberately-exfiltrating canary in a real probe container and checks seven properties: the
@@ -295,7 +324,7 @@ Week 2    ├─ WP5 backfill (instant historical corpus)                [DONE 2
 Weeks 2-4 ├─ WP6 diff engine   ─┐ built and calibrated against
           └─ WP7 classifier    ─┘ real backfilled mutations
 Weeks 4-12├─ WP8 sandbox    [DONE 2026-08-12, 400/400, containment verified]
-          ├─ WP9 divergence [BUILT 2026-08-12, harness validated on known-behaviour fixtures]
+          ├─ WP9 divergence [DONE 2026-08-12, validated; 31.2% of exercised tools diverge]
           └─ (observation window running continuously)
 Month 4+  └─ WP10 pinning retrospective, dashboard, release
 ```

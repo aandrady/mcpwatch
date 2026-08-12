@@ -24,6 +24,7 @@ from mcpwatch.store import Corpus, Layer
 
 from .capabilities import Capability
 from .declared import declared_profile
+from .llm import MODEL_ID, LlmDeclaredExtractor
 from .observe import observed_profile, parse_sinkhole, parse_strace
 from .protocol import select_tools, synthesize_arguments
 from .score import DivergenceReport, Finding, score_tool
@@ -118,9 +119,16 @@ def _fixture_tools(fixture: str) -> list[dict[str, Any]]:
 
 
 def _analyse(
-    payload: dict[str, Any], tools: list[dict[str, Any]], server_key: str
+    payload: dict[str, Any],
+    tools: list[dict[str, Any]],
+    server_key: str,
+    extractor: LlmDeclaredExtractor | None = None,
 ) -> list[Finding]:
-    """Turn one exercise payload into findings."""
+    """Turn one exercise payload into findings.
+
+    ``extractor`` widens the declared side only, so passing one can suppress
+    findings and never create them.
+    """
     events = parse_strace(str(payload.get("trace") or ""))
     sinkhole = parse_sinkhole(list(payload.get("egress") or []))
     by_name = {str(t.get("name")): t for t in tools}
@@ -132,9 +140,10 @@ def _analyse(
         if tool is None or not isinstance(window, list) or len(window) != 2:
             continue
         observed = observed_profile(events, sinkhole, (float(window[0]), float(window[1])))
-        findings.extend(
-            score_tool(server_key, str(call.get("tool")), declared_profile(tool), observed)
-        )
+        declared = declared_profile(tool)
+        if extractor is not None:
+            declared = extractor.augment(tool, declared)
+        findings.extend(score_tool(server_key, str(call.get("tool")), declared, observed))
     return findings
 
 
@@ -185,6 +194,7 @@ def _run(args: argparse.Namespace) -> int:
         print("sample is empty; run `python -m mcpwatch.sandbox sample` first", file=sys.stderr)
         return 1
 
+    extractor = LlmDeclaredExtractor(model_id=args.model) if args.llm else None
     report = DivergenceReport()
     with Corpus(args.corpus) as corpus:
         targets = _targets(corpus, specs, limit=args.limit)
@@ -222,7 +232,7 @@ def _run(args: argparse.Namespace) -> int:
                 answered = {str(c.get("tool")) for c in payload.get("calls") or []}
                 report.tools_exercised += len(answered)
                 report.unexercised += len(selected) - len(answered)
-                report.add(_analyse(payload, selected, server_key))
+                report.add(_analyse(payload, selected, server_key, extractor))
         finally:
             corpus.finish_run(run_id, stats=report.as_json())
 
@@ -283,6 +293,13 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="exercise sampled servers and report a divergence rate")
     run.add_argument("--limit", type=int, default=None, help="exercise only the first N servers")
     run.add_argument("--json", type=str, default=None, help="also write the full report here")
+    run.add_argument(
+        "--llm",
+        action="store_true",
+        help="also ask the pinned model what each description declares; this can "
+        "only suppress findings, never create them",
+    )
+    run.add_argument("--model", default=MODEL_ID, help="override the pin (drift experiments only)")
     run.add_argument(
         "--skip-validation",
         action="store_true",
