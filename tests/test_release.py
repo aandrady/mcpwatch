@@ -248,3 +248,72 @@ class TestSite:
 def test_metrics_json_round_trips():
     payload = summarise_changesets([], layer="registry", days=1.0).as_json()
     assert json.loads(json.dumps(payload)) == payload
+
+
+class TestConcentration:
+    """One publisher owning hundreds of servers is not hundreds of samples."""
+
+    def _fleet(self, size: int):
+        return [
+            changeset(
+                ChangeKind.SCHEMA_PARAM_ADDED,
+                flags=(SeverityFlag.CREDENTIAL_PARAM_ADDED,),
+                server=f"io.github.fleet/server-{i}",
+            )
+            for i in range(size)
+        ]
+
+    def test_a_fleet_wide_edit_is_reported_as_concentrated(self):
+        (outcome,) = replay(self._fleet(50), [STRICT])
+        top = outcome.concentration()
+        assert top is not None
+        namespace, count, share = top
+        assert (namespace, count) == ("io.github.fleet", 50)
+        assert share == pytest.approx(1.0)
+
+    def test_excluding_the_dominant_publisher_changes_the_headline(self):
+        sets = [
+            *self._fleet(50),
+            *(changeset(ChangeKind.VERSION_BUMPED, server=f"other/s{i}") for i in range(20)),
+        ]
+        (outcome,) = replay(sets, [STRICT])
+        # With the fleet counted, 20 benign blocks against 50 catches.
+        assert outcome.ratio() == pytest.approx(20 / 50)
+        # Without it, 20 benign blocks and nothing caught at all.
+        assert outcome.ratio_excluding("io.github.fleet") is None
+
+    def test_concentration_is_none_when_nothing_was_caught(self):
+        (outcome,) = replay([changeset(ChangeKind.VERSION_BUMPED)], [STRICT])
+        assert outcome.concentration() is None
+
+    def test_the_warning_appears_in_the_report_when_catches_are_concentrated(self):
+        text = render(replay(self._fleet(50), [STRICT]), layer="manifest", transitions=50)
+        assert "CONCENTRATION WARNING" in text
+        assert "io.github.fleet" in text
+
+    def test_no_warning_when_catches_are_spread_across_publishers(self):
+        sets = [
+            changeset(
+                ChangeKind.SCHEMA_PARAM_ADDED,
+                flags=(SeverityFlag.CREDENTIAL_PARAM_ADDED,),
+                server=f"pub{i}/s",
+            )
+            for i in range(20)
+        ]
+        text = render(replay(sets, [STRICT]), layer="manifest", transitions=20)
+        assert "CONCENTRATION WARNING" not in text
+
+    def test_the_json_carries_the_adjusted_ratio(self):
+        sets = [
+            *self._fleet(50),
+            changeset(
+                ChangeKind.SCHEMA_PARAM_ADDED,
+                flags=(SeverityFlag.NETWORK_PARAM_ADDED,),
+                server="other/s",
+            ),
+        ]
+        (outcome,) = replay(sets, [STRICT])
+        payload = outcome.as_json()
+        assert payload["largest_publisher"] == "io.github.fleet"
+        assert payload["largest_publisher_share"] == pytest.approx(50 / 51, abs=1e-3)
+        assert payload["friction_ratio_excluding_largest"] == pytest.approx(0.0)
