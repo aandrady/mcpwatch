@@ -117,6 +117,8 @@ class Candidate:
     version_count: int
     declares_secret: bool
     environment_variables: tuple[dict[str, JsonValue], ...] = ()
+    package_arguments: tuple[dict[str, JsonValue], ...] = ()
+    runtime_arguments: tuple[dict[str, JsonValue], ...] = ()
 
     @property
     def version_bucket(self) -> str:
@@ -139,7 +141,20 @@ class Candidate:
             "identifier": self.identifier,
             "version": self.version,
             "environment_variables": list(self.environment_variables),
+            # 892 of the 9,197 servers in the frame (9.7%) declare these, and a
+            # launcher that ignores them starts the package's CLI instead of its
+            # MCP server — which fails in a way indistinguishable from a broken
+            # package unless you read the stderr.
+            "package_arguments": list(self.package_arguments),
+            "runtime_arguments": list(self.runtime_arguments),
         }
+
+
+def _dicts(value: JsonValue) -> tuple[dict[str, JsonValue], ...]:
+    """The dict entries of a declared list, tolerating anything else."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, dict))
 
 
 def _is_eligible(package: JsonValue) -> TypeGuard[dict[str, JsonValue]]:
@@ -204,12 +219,7 @@ def candidates(corpus: Corpus) -> Iterator[Candidate]:
         # several is rare (732 of 11,311) and picking one keeps a member's
         # identity stable across cycles.
         package = packages[0]
-        variables = package.get("environmentVariables")
-        env = tuple(
-            item
-            for item in (variables if isinstance(variables, list) else [])
-            if isinstance(item, dict)
-        )
+        env = _dicts(package.get("environmentVariables"))
         yield Candidate(
             server_key=row["server_key"],
             registry_type=str(package["registryType"]),
@@ -218,6 +228,8 @@ def candidates(corpus: Corpus) -> Iterator[Candidate]:
             version_count=int(version_counts.get(row["server_key"], 1)),
             declares_secret=any(item.get("isSecret") for item in env),
             environment_variables=env,
+            package_arguments=_dicts(package.get("packageArguments")),
+            runtime_arguments=_dicts(package.get("runtimeArguments")),
         )
 
 

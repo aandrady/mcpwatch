@@ -87,7 +87,7 @@ def install(spec: dict) -> list[str]:
             ["npm", "install", "--ignore-scripts", "--no-save", "--prefix", NODE_PREFIX, pinned],
             "install_failed",
         )
-        return npm_command(identifier)
+        return npm_command(identifier, spec) + package_arguments(spec)
     if registry == "pypi":
         pinned = f"{identifier}=={version}" if version else identifier
         # A venv, not `pip install --target`. `--target` does not generate the
@@ -98,7 +98,7 @@ def install(spec: dict) -> list[str]:
         run([sys.executable, "-m", "venv", VENV], "install_failed")
         before = set(os.listdir(f"{VENV}/bin"))
         run([f"{VENV}/bin/pip", "install", "--no-cache-dir", pinned], "install_failed")
-        return venv_command(identifier, before)
+        return venv_command(identifier, before, spec) + package_arguments(spec)
     raise Failed("install_failed", f"unsupported registry type {registry!r}")
 
 
@@ -109,7 +109,51 @@ def run(cmd: list[str], klass: str) -> None:
         raise Failed(klass, (result.stderr or result.stdout)[-STDERR_TAIL:])
 
 
-def npm_command(identifier: str) -> list[str]:
+def package_arguments(spec: dict) -> list[str]:
+    """Arguments the registry says the package's own binary needs.
+
+    Several servers ship as a CLI whose MCP mode is a subcommand — without
+    these, `linebreak-gate` prints its usage and exits 2, which is
+    indistinguishable from a broken package unless you read the stderr.
+
+    Only arguments carrying a concrete value are passed. A declared-but-empty
+    required argument is one we have nothing to fill in, and inventing a value
+    would be supplying input to a third-party process rather than enumerating it.
+    """
+    argv: list[str] = []
+    for item in spec.get("package_arguments") or []:
+        value = item.get("value")
+        if value is None:
+            value = item.get("default")
+        if item.get("type") == "named":
+            name = item.get("name")
+            if not name:
+                continue
+            argv.append(str(name))
+            if value is not None:
+                argv.append(str(value))
+        elif value is not None:
+            argv.append(str(value))
+    return argv
+
+
+def _preferred_bin(spec: dict) -> str | None:
+    """A bin name named by the runtime arguments, if there is one.
+
+    `runtimeArguments` target npx or uvx, which this sandbox deliberately does
+    not use — it installs the pinned version itself rather than letting a
+    launcher resolve one over a network it does not have. But a positional among
+    them frequently names *which* bin to run, and that is the one piece of the
+    declaration still worth honouring: `@clize/clize` ships two bins and the
+    default is the CLI, not the server.
+    """
+    for item in spec.get("runtime_arguments") or []:
+        if item.get("type") == "positional" and item.get("value"):
+            return str(item["value"])
+    return None
+
+
+def npm_command(identifier: str, spec: dict) -> list[str]:
     """Resolve an npm package's launch command from its own ``package.json``.
 
     The ``bin`` field, not the package name. A scoped package almost never has
@@ -130,7 +174,8 @@ def npm_command(identifier: str) -> list[str]:
 
     entry = data.get("bin")
     if isinstance(entry, dict):
-        entry = next(iter(entry.values()), None)
+        preferred = _preferred_bin(spec)
+        entry = entry.get(preferred) if preferred in entry else next(iter(entry.values()), None)
     if not isinstance(entry, str):
         # No bin field. `main` is the module a consumer would import, and a
         # stdio server frequently ships as exactly that.
@@ -144,7 +189,7 @@ def npm_command(identifier: str) -> list[str]:
     return ["node", path]
 
 
-def venv_command(identifier: str, before: set) -> list[str]:
+def venv_command(identifier: str, before: set, spec: dict) -> list[str]:
     """Find the console script a PyPI distribution installed into the venv.
 
     Identified by what appeared in ``bin`` during the install rather than by
@@ -153,6 +198,9 @@ def venv_command(identifier: str, before: set) -> list[str]:
     """
     after = set(os.listdir(f"{VENV}/bin"))
     scripts = sorted(after - before - {"__pycache__"})
+    preferred = _preferred_bin(spec)
+    if preferred and preferred in scripts:
+        return [f"{VENV}/bin/{preferred}"]
     if scripts:
         # Prefer a script whose name resembles the distribution when a package
         # installs several, so the choice is stable across cycles.

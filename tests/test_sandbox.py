@@ -47,14 +47,22 @@ class TestContainerSideSyntax:
         ast.parse(path.read_text(encoding="utf-8"), feature_version=CONTAINER_PYTHON)
 
 
-def _load_sinkhole():
-    """Import the sinkhole module from deploy/, which is not an installed package."""
-    path = Path(__file__).resolve().parents[1] / "deploy" / "sandbox" / "sinkhole" / "sinkhole.py"
-    spec = importlib.util.spec_from_file_location("sinkhole_under_test", path)
+def _load_deploy_module(name: str, *parts: str):
+    """Import a module from deploy/, which is not an installed package."""
+    path = Path(__file__).resolve().parents[1] / "deploy" / "sandbox" / Path(*parts)
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_sinkhole():
+    return _load_deploy_module("sinkhole_under_test", "sinkhole", "sinkhole.py")
+
+
+def _load_driver():
+    return _load_deploy_module("driver_under_test", "probe", "driver.py")
 
 
 def candidate(
@@ -230,6 +238,13 @@ class TestCandidates:
         _store(corpus, "d.example/mcp", _registry_document("d.example/mcp", packages=[package]))
         assert list(candidates(corpus)) == []
 
+    def test_declared_launch_arguments_ride_along_in_the_spec(self, corpus):
+        package = _npm_package()
+        package["packageArguments"] = [{"type": "positional", "value": "mcp"}]
+        _store(corpus, "f.example/mcp", _registry_document("f.example/mcp", packages=[package]))
+        (found,) = list(candidates(corpus))
+        assert found.as_spec()["package_arguments"] == [{"type": "positional", "value": "mcp"}]
+
     def test_a_declared_secret_lands_in_the_stratum(self, corpus):
         _store(
             corpus,
@@ -269,6 +284,56 @@ class TestSampleStore:
             (spec,) = store.specs()
             assert spec["identifier"] == "@a/mcp"
             assert spec["registry_type"] == "npm"
+
+
+# -------------------------------------------------------------- launch argv ---
+
+
+class TestLaunchArguments:
+    """9.7% of the frame declares these; ignoring them starts the wrong program."""
+
+    def setup_method(self):
+        self.driver = _load_driver()
+
+    def test_a_positional_subcommand_is_passed_through(self):
+        # linebreak-gate prints usage and exits 2 without its `mcp` subcommand.
+        spec = {"package_arguments": [{"type": "positional", "value": "mcp"}]}
+        assert self.driver.package_arguments(spec) == ["mcp"]
+
+    def test_a_named_argument_carries_its_value(self):
+        spec = {"package_arguments": [{"type": "named", "name": "--mode", "value": "server"}]}
+        assert self.driver.package_arguments(spec) == ["--mode", "server"]
+
+    def test_a_named_flag_without_a_value_is_still_passed(self):
+        spec = {"package_arguments": [{"type": "named", "name": "--stdio"}]}
+        assert self.driver.package_arguments(spec) == ["--stdio"]
+
+    def test_a_default_stands_in_for_a_missing_value(self):
+        spec = {"package_arguments": [{"type": "positional", "default": "serve"}]}
+        assert self.driver.package_arguments(spec) == ["serve"]
+
+    def test_a_declared_argument_with_nothing_to_fill_in_is_skipped(self):
+        # Inventing a value would be supplying input to a third-party process
+        # rather than enumerating it.
+        spec = {"package_arguments": [{"type": "positional", "isRequired": True}]}
+        assert self.driver.package_arguments(spec) == []
+
+    def test_no_declaration_produces_no_arguments(self):
+        assert self.driver.package_arguments({}) == []
+
+    def test_runtime_arguments_name_which_bin_to_run(self):
+        # @clize/clize ships two bins and the default is the CLI, not the server.
+        spec = {
+            "runtime_arguments": [
+                {"type": "named", "name": "--package", "value": "@clize/clize"},
+                {"type": "positional", "value": "clize-mcp"},
+            ]
+        }
+        assert self.driver._preferred_bin(spec) == "clize-mcp"
+
+    def test_no_positional_runtime_argument_means_no_preference(self):
+        spec = {"runtime_arguments": [{"type": "named", "name": "--package", "value": "x"}]}
+        assert self.driver._preferred_bin(spec) is None
 
 
 # ------------------------------------------------------------------ sinkhole ---
