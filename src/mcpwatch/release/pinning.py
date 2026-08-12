@@ -172,6 +172,15 @@ class PolicyOutcome:
 
     caught_by_flag: dict[str, int] = field(default_factory=dict)
 
+    blocked_by_namespace: dict[str, int] = field(default_factory=dict)
+    caught_by_namespace: dict[str, int] = field(default_factory=dict)
+    """Per publisher, because this population is not one server per publisher.
+
+    One namespace owns 684 servers in the corpus, and a single fleet-wide edit
+    there produces 684 transitions that a naive count reads as 684 independent
+    catches. See :meth:`concentration`.
+    """
+
     @property
     def friction(self) -> int:
         """Blocked transitions with no flag at all."""
@@ -190,11 +199,39 @@ class PolicyOutcome:
         benign = self.blocked - caught
         return benign / caught
 
+    def concentration(self) -> tuple[str, int, float] | None:
+        """The publisher contributing most catches, its count, and its share.
+
+        A monoculture check. Publishers here are not independent samples: one
+        operator can own hundreds of servers and push an identical edit to all
+        of them in a day, which inflates 'caught' by that fleet's size and makes
+        pinning look proportionally better. Reporting the share lets a reader
+        see when a headline ratio is one event wearing many hats.
+        """
+        if not self.caught_by_namespace or self.caught == 0:
+            return None
+        namespace, count = max(self.caught_by_namespace.items(), key=lambda kv: kv[1])
+        return namespace, count, count / self.caught
+
+    def ratio_excluding(self, namespace: str) -> float | None:
+        """The friction ratio with one publisher's whole fleet removed.
+
+        Not a correction — the fleet's transitions are real. A sensitivity
+        check: if dropping one publisher moves the headline substantially, the
+        headline was about that publisher.
+        """
+        caught = self.caught - self.caught_by_namespace.get(namespace, 0)
+        blocked = self.blocked - self.blocked_by_namespace.get(namespace, 0)
+        if caught <= 0:
+            return None
+        return (blocked - caught) / caught
+
     def as_json(self) -> dict[str, JsonValue]:
         """Render for the report."""
         ratio = self.ratio()
         strict = self.ratio(high_signal=True)
-        return {
+        top = self.concentration()
+        payload: dict[str, JsonValue] = {
             "policy": self.policy.name,
             "description": self.policy.description,
             "blocked": self.blocked,
@@ -207,6 +244,16 @@ class PolicyOutcome:
             "friction_ratio_high_signal": None if strict is None else round(strict, 2),
             "caught_by_flag": dict(sorted(self.caught_by_flag.items())),
         }
+        if top is not None:
+            namespace, count, share = top
+            adjusted = self.ratio_excluding(namespace)
+            payload["largest_publisher"] = namespace
+            payload["largest_publisher_catches"] = count
+            payload["largest_publisher_share"] = round(share, 4)
+            payload["friction_ratio_excluding_largest"] = (
+                None if adjusted is None else round(adjusted, 2)
+            )
+        return payload
 
 
 def replay(
@@ -226,10 +273,17 @@ def replay(
         flags = set(changeset.flags)
         high = bool(flags & HIGH_SIGNAL_FLAGS)
 
+        namespace = changeset.server_key.split("/", 1)[0]
         for outcome in outcomes:
             if blocks(changeset, outcome.policy):
                 outcome.blocked += 1
+                outcome.blocked_by_namespace[namespace] = (
+                    outcome.blocked_by_namespace.get(namespace, 0) + 1
+                )
                 if flags:
+                    outcome.caught_by_namespace[namespace] = (
+                        outcome.caught_by_namespace.get(namespace, 0) + 1
+                    )
                     outcome.caught += 1
                     for flag in flags:
                         outcome.caught_by_flag[str(flag)] = (
@@ -277,6 +331,21 @@ def render(outcomes: list[PolicyOutcome], *, layer: str, transitions: int) -> st
         "cleared, an endpoint or repository moving. The gap between the two columns",
         "is how much of the answer comes from the proxy rather than from the data.",
     ]
+
+    top = outcomes[0].concentration() if outcomes else None
+    if top is not None and top[2] >= 0.2:
+        namespace, count, share = top
+        adjusted = outcomes[0].ratio_excluding(namespace)
+        lines += [
+            "",
+            f"CONCENTRATION WARNING: {share:.0%} of catches ({count:,}) come from one",
+            f"publisher, {namespace}. Publishers here are not independent samples — one",
+            "operator can own hundreds of servers and push an identical edit to all of",
+            "them in a day, which a naive count reads as hundreds of separate catches.",
+            f"Excluding that publisher entirely, the friction ratio is "
+            f"{'undefined' if adjusted is None else f'{adjusted:,.1f}'} rather than "
+            f"{outcomes[0].ratio():,.1f}.",
+        ]
 
     distinct = {(o.blocked, o.passed, o.caught) for o in outcomes}
     if len(distinct) == 1 and len(outcomes) > 1:
