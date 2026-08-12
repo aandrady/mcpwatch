@@ -247,19 +247,22 @@ def replay(
 def render(outcomes: list[PolicyOutcome], *, layer: str, transitions: int) -> str:
     """Human-readable retrospective."""
     lines = [
-        f"Pinning retrospective over {transitions} {layer}-layer transitions",
+        f"Pinning retrospective over {transitions:,} {layer}-layer transitions",
         "",
-        f"{'policy':<20} {'blocked':>9} {'passed':>8} {'caught':>7} "
-        f"{'missed':>7} {'friction/catch':>15}",
-        "-" * 72,
+        f"{'policy':<20} {'blocked':>8} {'passed':>7} {'caught':>7} {'missed':>7}"
+        f" {'friction/catch':>15} {'high-signal':>12}",
+        "-" * 82,
     ]
     for outcome in outcomes:
-        ratio = outcome.ratio()
-        shown = "n/a" if ratio is None else f"{ratio:,.1f}"
+        loose = outcome.ratio()
+        strict = outcome.ratio(high_signal=True)
         lines.append(
-            f"{outcome.policy.name:<20} {outcome.blocked:>9,} {outcome.passed:>8,} "
-            f"{outcome.caught:>7,} {outcome.missed:>7,} {shown:>15}"
+            f"{outcome.policy.name:<20} {outcome.blocked:>8,} {outcome.passed:>7,} "
+            f"{outcome.caught:>7,} {outcome.missed:>7,} "
+            f"{('n/a' if loose is None else f'{loose:,.1f}'):>15}"
+            f" {('n/a' if strict is None else f'{strict:,.1f}'):>12}"
         )
+
     lines += [
         "",
         "'caught' counts blocked transitions carrying any WP6 severity flag — a",
@@ -267,5 +270,22 @@ def render(outcomes: list[PolicyOutcome], *, layer: str, transitions: int) -> st
         "no adjudicated labels exist yet. Treating every flag as security-relevant",
         "is an upper bound on what pinning catches, which makes every friction",
         "ratio here a LOWER bound on what pinning costs.",
+        "",
+        "The 'high-signal' column repeats the ratio counting only flags that name a",
+        "capability or authority change — a credential, network or filesystem",
+        "parameter appearing, text addressed to the model, a destructive hint",
+        "cleared, an endpoint or repository moving. The gap between the two columns",
+        "is how much of the answer comes from the proxy rather than from the data.",
     ]
+
+    distinct = {(o.blocked, o.passed, o.caught) for o in outcomes}
+    if len(distinct) == 1 and len(outcomes) > 1:
+        lines += [
+            "",
+            "Every policy variant produced an identical outcome. The variants exempt",
+            "tool-level changes — a new tool, a description edit, an added parameter —",
+            "and this layer has none: a registry transition is a republication, and",
+            "99.8% of them bump the version, which no pinning policy exempts. The",
+            "sensitivity analysis only has room to move at the manifest layer.",
+        ]
     return "\n".join(lines)
