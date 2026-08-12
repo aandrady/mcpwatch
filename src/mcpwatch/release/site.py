@@ -124,7 +124,9 @@ def render_site(
         Stat(
             "registry transitions",
             f"{registry.transitions:,}" if registry else "—",
-            "retrospective, from the registry's own version history",
+            f"spanning {registry.history_span_days:,.0f} days of published history"
+            if registry
+            else "",
         ),
         Stat(
             "Layer-2 observation",

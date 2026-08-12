@@ -67,6 +67,18 @@ class Metrics:
 
     layer: str
     observation_days: float
+    """Days we have been *collecting* this layer. Never annualise a Layer-2 rate."""
+
+    history_span_days: float = 0.0
+    """Days the layer's records actually span.
+
+    Different from :attr:`observation_days` and the difference is the whole
+    two-layer design. Layer 1 was collected for days but covers years, because
+    the registry publishes its own version history and WP5 backfilled it. Layer 2
+    covers exactly as long as it has been collected, because nothing can
+    reconstruct a tool manifest from before the first probe. Reporting only the
+    collection window would understate Layer 1 by three orders of magnitude.
+    """
     servers: int = 0
     transitions: int = 0
     changed: int = 0
@@ -111,6 +123,7 @@ class Metrics:
         return {
             "layer": self.layer,
             "observation_days": round(self.observation_days, 2),
+            "history_span_days": round(self.history_span_days, 2),
             "servers": self.servers,
             "servers_changed": self.servers_changed,
             "transitions": self.transitions,
@@ -133,9 +146,11 @@ class Metrics:
         }
 
 
-def summarise_changesets(changesets: list[ChangeSet], *, layer: str, days: float) -> Metrics:
+def summarise_changesets(
+    changesets: list[ChangeSet], *, layer: str, days: float, span: float = 0.0
+) -> Metrics:
     """Fold ChangeSets into one layer's metrics."""
-    metrics = Metrics(layer=layer, observation_days=days)
+    metrics = Metrics(layer=layer, observation_days=days, history_span_days=span)
     servers: set[str] = set()
     changed_servers: set[str] = set()
 
@@ -212,7 +227,7 @@ def collect_coverage(corpus: Corpus) -> Coverage:
 
 
 def observation_days(corpus: Corpus, layer: Layer) -> float:
-    """How long this layer has actually been observed.
+    """How long this layer has actually been collected.
 
     Measured from the first observation rather than from a hardcoded start date,
     so the figure stays true if collection is ever interrupted and resumed.
@@ -223,6 +238,24 @@ def observation_days(corpus: Corpus, layer: Layer) -> float:
     if row is None or row[0] is None:
         return 0.0
     return (utcnow() - from_iso(row[0])).total_seconds() / 86400
+
+
+def history_span_days(corpus: Corpus, layer: Layer) -> float:
+    """How long this layer's records span, which is not how long we collected.
+
+    Keyed on ``effective_at``: for Layer 1 that is the registry's own
+    ``publishedAt``, so the span reaches back years despite days of collection.
+    For Layer 2 it falls back to ``observed_at`` and the two figures agree, which
+    is itself the point — nothing can reconstruct a manifest from before the
+    first probe.
+    """
+    row = corpus.index.connection.execute(
+        "SELECT min(effective_at), max(effective_at) FROM observation WHERE layer = ?",
+        (str(layer),),
+    ).fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return 0.0
+    return (from_iso(row[1]) - from_iso(row[0])).total_seconds() / 86400
 
 
 def flag_glossary() -> dict[str, str]:

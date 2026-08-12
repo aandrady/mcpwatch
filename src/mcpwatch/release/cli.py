@@ -21,7 +21,12 @@ from mcpwatch.store import Corpus, Layer, to_iso, utcnow
 
 from . import pinning
 from .datasheet import render_datasheet
-from .metrics import collect_coverage, observation_days, summarise_changesets
+from .metrics import (
+    collect_coverage,
+    history_span_days,
+    observation_days,
+    summarise_changesets,
+)
 from .site import render_site
 
 __all__ = ["main"]
@@ -135,6 +140,7 @@ def _metrics(args: argparse.Namespace) -> int:
                 _changesets(corpus, layer),
                 layer=str(layer),
                 days=observation_days(corpus, layer),
+                span=history_span_days(corpus, layer),
             )
             for layer in (Layer.REGISTRY, Layer.MANIFEST)
         ]
@@ -159,6 +165,7 @@ def _build(args: argparse.Namespace) -> int:
                 _changesets(corpus, layer),
                 layer=str(layer),
                 days=observation_days(corpus, layer),
+                span=history_span_days(corpus, layer),
             )
             for layer in (Layer.REGISTRY, Layer.MANIFEST)
         ]

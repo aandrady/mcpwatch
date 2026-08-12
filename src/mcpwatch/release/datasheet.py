@@ -128,8 +128,8 @@ def render_datasheet(
         "",
         "### Layers",
         "",
-        "| Layer | Source | Retrospective? | Window |",
-        "|---|---|---|---|",
+        "| Layer | Source | Retrospective? | Collected for | Records span |",
+        "|---|---|---|---|---|",
     ]
     for metrics in layers:
         is_registry = metrics.layer == "registry"
@@ -137,14 +137,19 @@ def render_datasheet(
         source = "registry metadata" if is_registry else "live tool manifests"
         lines.append(
             f"| {metrics.layer} | {source} | {retrospective} "
-            f"| {metrics.observation_days:.1f} days observed |"
+            f"| {metrics.observation_days:.1f} days "
+            f"| {metrics.history_span_days:,.0f} days |"
         )
 
     lines += [
         "",
-        "Layer 2 cannot be backfilled. A day not collected is gone permanently,",
-        "which is why the collector shipped crude and running rather than clean and",
-        "later.",
+        "The two columns differ for a reason that is the whole two-layer design.",
+        "Layer 1 has been collected for days and covers years, because the registry",
+        "publishes its own version history and WP5 backfilled it. Layer 2's two",
+        "figures are equal and always will be: nothing can reconstruct a tool",
+        "manifest from before the first probe, so a day not collected is gone",
+        "permanently. That is why the collector shipped crude and running rather",
+        "than clean and later.",
         "",
         "## Collection methodology",
         "",
