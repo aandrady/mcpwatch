@@ -146,8 +146,37 @@ does mean the gate rests almost entirely on the human labels.
 
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
-| **8** | **Package-server sandbox enumeration** | Docker harness + **stratified sample** of the 10,826 package servers | Documented sampling frame; no egress escapes sinkhole |
+| **8** | **Package-server sandbox enumeration** — **[BUILT 2026-08-12]** | Docker harness + **400-server stratified sample** drawn from a frame of 9,197 | Met: 7/7 containment properties verified against a live exfiltrating canary; sampling frame documented and seeded |
 | **9** | **Description-behavior divergence** | Instrumented execution; declared vs. observed capability diff | Instrumentation validated on known-behavior servers |
+
+**WP8's containment gate is green.** `python -m mcpwatch.sandbox verify` runs a
+deliberately-exfiltrating canary in a real probe container and checks seven properties: the
+sandbox network is `--internal` (no route off the host), only the sinkhole is attached, DNS
+resolves to the sinkhole, the attempts were recorded, no bytes came back, the Docker socket /
+corpus / `/etc/shadow` / `/host` are unreachable, and a write outside the working directory
+fails. The canary's 18 DNS queries and 6 TCP connections were captured with SNI intact and
+nothing escaped. `probe` re-runs the gate every cycle and refuses to start on any failure,
+because the daemon, its networks and the images are all mutable host state.
+
+**The frame** is 9,197 servers: npm or PyPI, stdio transport, and **no remote endpoint**. The
+1,072 dual-transport servers are excluded because WP3 already probes them over HTTP, and writing
+two different Layer-2 manifests for one `server_key` would manufacture a mutation every cycle —
+§3's phantom-mutation failure. mcpb (810), oci (706), nuget (100) and cargo (28) are excluded as
+needing their own install toolchains; OCI in particular means running a publisher's image rather
+than our hardened one, which is a different containment posture and deserves its own gate.
+
+**Validation, 20 servers:** 16 enumerated (1–121 tools each), 3 crashed, 1 `requires_credentials`.
+The first attempt returned 3 of 20, and closing that gap was three bugs in our launcher rather
+than a property of the ecosystem — npm bin names resolved from `package.json` instead of guessed
+from the identifier, PyPI installed into a venv so console scripts exist, and the 9.7% of servers
+that declare `packageArguments` actually receiving them. A coverage number is a headline result,
+so it has to measure them and not us.
+
+**Already a finding:** 7 of 20 servers opened network connections while merely listing their
+tools. Nothing about enumeration requires egress. The sinkhole is what makes that sayable.
+
+Not yet scheduled: a full 400-member cycle should be observed end to end before a timer runs it
+unattended.
 
 ### Wave 4 — Outputs (after ≥3 months of observation)
 
@@ -179,7 +208,7 @@ Week 1    ├─ [DONE] VPS provisioned & verified — ssh mcpwatch
 Week 2    ├─ WP5 backfill (instant historical corpus)                [DONE 2026-08-11]
 Weeks 2-4 ├─ WP6 diff engine   ─┐ built and calibrated against
           └─ WP7 classifier    ─┘ real backfilled mutations
-Weeks 4-12├─ WP8 sandbox → WP9 divergence harness
+Weeks 4-12├─ WP8 sandbox        [BUILT 2026-08-12, containment verified] → WP9 divergence
           └─ (observation window running continuously)
 Month 4+  └─ WP10 pinning retrospective, dashboard, release
 ```
