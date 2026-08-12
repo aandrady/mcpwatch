@@ -91,6 +91,13 @@ firing means the driver itself is wedged, which is a different failure and worth
 distinguishing. At 300s it fired routinely on merely-slow servers, and the
 exception propagated out of a worker and ended a 400-member cycle at member 99.
 """
+EXERCISE_TIMEOUT = 600.0
+"""Backstop on one WP9 exercise run.
+
+Ten tools at a 25s call timeout plus settle, on top of a launch, comfortably
+fits; this fires only if the exerciser itself wedges.
+"""
+
 SENTINEL = "===MCPWATCH-RESULT==="
 
 
@@ -285,7 +292,7 @@ class Sandbox:
 
     # ----------------------------------------------------------------- probe ---
 
-    def run_flags(self, name: str, *, isolated: bool = True) -> list[str]:
+    def run_flags(self, name: str, *, isolated: bool = True, traceable: bool = False) -> list[str]:
         """The hardening applied to every probe container.
 
         Enumerated in one place so the containment test and the real probe
@@ -298,6 +305,12 @@ class Sandbox:
                 resolver. False puts the container on the install network with
                 ordinary DNS, which is only ever used for the install phase,
                 before any publisher code runs.
+            traceable: Grant ``SYS_PTRACE`` so WP9's exerciser can run the server
+                under strace. Off for every WP8 probe. ptrace is confined to the
+                container's own PID namespace and grants nothing on the host,
+                but it is still a capability handed to a container running
+                third-party code, so it is requested explicitly by the one
+                caller that needs it rather than being on by default.
         """
         network = [
             "--network",
@@ -308,10 +321,12 @@ class Sandbox:
             # create time, and pointing it at the sinkhole would leave the
             # install phase unable to resolve the package registry.
             network += ["--dns", self._sinkhole_ip]
+        trace = ["--cap-add", "SYS_PTRACE"] if traceable else []
         return [
             "--name",
             name,
             *network,
+            *trace,
             "--user",
             "10001:10001",
             "--cap-drop",
@@ -423,6 +438,137 @@ class Sandbox:
         result["egress"] = self.collect_egress()
         return self._result(spec, result, started)
 
+    def exercise(self, spec: dict[str, Any], plan: list[dict[str, Any]]) -> dict[str, Any]:
+        """Install, then invoke a plan of tool calls under strace. WP9 only.
+
+        The same two-container lifecycle as :meth:`probe`, with two differences:
+        the isolated container gets ``SYS_PTRACE`` so strace can follow the
+        server, and it runs ``exercise.py`` rather than ``driver.py`` — the only
+        code path in this project that issues ``tools/call``.
+
+        Args:
+            spec: The install spec, as :meth:`probe` takes.
+            plan: ``[{"tool": name, "arguments": {...}}]``, built on the host by
+                :mod:`mcpwatch.divergence.protocol`. This method executes the
+                plan and never adds to it.
+
+        Returns:
+            The exerciser's payload: per-call windows, the strace log, and the
+            sinkhole records for the session.
+        """
+        if not self._sinkhole_ip:
+            self.start_sinkhole()
+        stem = spec["server_key"].replace("/", "-").replace(".", "-")[:40]
+        installer, exerciser = f"mcpwatch-install-{stem}", f"mcpwatch-exercise-{stem}"
+        image = f"{STAGED_PREFIX}:x-{stem.lower()}"
+        environment = [
+            "-e",
+            f"MCPWATCH_SPEC={json.dumps(spec)}",
+            "-e",
+            f"MCPWATCH_PLAN={json.dumps(plan)}",
+        ]
+        for name in (installer, exerciser):
+            docker("rm", "-f", name, check=False)
+
+        try:
+            if not spec.get("command"):
+                docker(
+                    "run",
+                    "-d",
+                    *self.run_flags(installer, isolated=False),
+                    *environment,
+                    "--entrypoint",
+                    "sleep",
+                    self.probe_image,
+                    str(INSTALL_TIMEOUT + 60),
+                )
+                install = self.exec_driver(installer, "install", timeout=INSTALL_TIMEOUT)
+                if install.get("status") != "ok":
+                    return install
+                docker("commit", installer, image, timeout=300.0)
+                docker("rm", "-f", installer, check=False, timeout=60.0)
+                source = image
+            else:
+                # A fixture with an explicit command needs no install step.
+                source = self.probe_image
+
+            docker(
+                "run",
+                "-d",
+                *self.run_flags(exerciser, isolated=True, traceable=True),
+                *environment,
+                "--entrypoint",
+                "sleep",
+                source,
+                str(EXERCISE_TIMEOUT + 60),
+            )
+            self._assert_isolated(exerciser)
+            self.mark_sinkhole()
+
+            result = self.exec_driver(
+                exerciser, "exercise", timeout=EXERCISE_TIMEOUT, script="exercise.py"
+            )
+            result["egress"] = self.collect_egress()
+            result["filesystem_diff"] = self._filesystem_diff(exerciser)
+            return result
+        finally:
+            for name in (installer, exerciser):
+                docker("rm", "-f", name, check=False, timeout=60.0)
+            docker("rmi", "-f", image, check=False, timeout=120.0)
+
+    def exercise_fixture(
+        self, spec: dict[str, Any], plan: list[dict[str, Any]], source: Path
+    ) -> dict[str, Any]:
+        """Exercise a local fixture server through the real isolated path.
+
+        Used by WP9's validation gate. The fixture is copied into a container
+        started with exactly the flags a real exercise run uses, so the thing
+        being validated is the harness that will run against third parties —
+        not a rehearsal of it with different plumbing.
+        """
+        if not self._sinkhole_ip:
+            self.start_sinkhole()
+        name = f"mcpwatch-fixture-{spec['server_key'].rsplit('/', 1)[-1][:40]}"
+        target = str(spec["command"][-1])
+        environment = [
+            "-e",
+            f"MCPWATCH_SPEC={json.dumps(spec)}",
+            "-e",
+            f"MCPWATCH_PLAN={json.dumps(plan)}",
+        ]
+        docker("rm", "-f", name, check=False)
+        try:
+            docker(
+                "run",
+                "-d",
+                *self.run_flags(name, isolated=True, traceable=True),
+                *environment,
+                "--entrypoint",
+                "sleep",
+                self.probe_image,
+                str(EXERCISE_TIMEOUT + 60),
+            )
+            docker("cp", str(source), f"{name}:{target}")
+            self._assert_isolated(name)
+            self.mark_sinkhole()
+            result = self.exec_driver(
+                name, "exercise", timeout=EXERCISE_TIMEOUT, script="exercise.py"
+            )
+            result["egress"] = self.collect_egress()
+            result["filesystem_diff"] = self._filesystem_diff(name)
+            return result
+        finally:
+            docker("rm", "-f", name, check=False, timeout=60.0)
+
+    def _filesystem_diff(self, name: str) -> list[str]:
+        """What changed in the container's filesystem, as corroboration.
+
+        Server-level, not per-tool, so this never carries a finding on its own —
+        it exists to catch a write strace somehow missed.
+        """
+        listed = docker("diff", name, check=False, timeout=60.0).stdout.splitlines()
+        return [line for line in listed if line][:200]
+
     def _assert_isolated(self, name: str) -> None:
         """Refuse to run publisher code in a container with a way out.
 
@@ -439,16 +585,25 @@ class Sandbox:
             msg = f"container {name} is attached to {attached}, expected only {SINKHOLE_NETWORK}"
             raise ContainmentError(msg)
 
-    def exec_driver(self, name: str, mode: str, *, timeout: float) -> dict[str, Any]:
+    def exec_driver(
+        self, name: str, mode: str, *, timeout: float, script: str = "driver.py"
+    ) -> dict[str, Any]:
         """Run one driver phase and parse its result.
 
         A timeout is an outcome, not an exception. The driver normally bounds
         itself and reports; reaching this means it is wedged, and one wedged
         container must not end the cycle.
+
+        Args:
+            name: Container to exec in.
+            mode: Phase argument passed to the script.
+            timeout: Backstop for the exec itself.
+            script: Which driver to run. WP8 uses ``driver.py``, which has no
+                code path to a tool call; WP9 passes ``exercise.py``.
         """
         try:
             result = docker(
-                "exec", name, "python3", "/srv/probe/driver.py", mode, timeout=timeout, check=False
+                "exec", name, "python3", f"/srv/probe/{script}", mode, timeout=timeout, check=False
             )
         except subprocess.TimeoutExpired:
             return {
