@@ -37,8 +37,15 @@ PROTOCOL_VERSION = "2025-06-18"
 READ_ONLY_METHODS = ("tools/list", "resources/list", "prompts/list")
 """`tools/call` is absent by construction."""
 
-LAUNCH_TIMEOUT = 90.0
-"""Wall clock for one launch: spawn, handshake, enumerate, exit."""
+PROBE_BUDGET = 240.0
+"""Total wall clock the whole probe phase may consume, across every launch.
+
+The per-request timeout alone does not bound this. Up to three launches happen
+(a bare one, a placeholder retry, then the determinism second probe) and each
+issues four requests, so a server that stalls every one of them reaches
+3 x 4 x 30 = 360s — longer than the `docker exec` the runner wraps this in, and
+the timeout surfaced there as a crashed *cycle* rather than one slow server.
+Bounding it here means the outer timeout is only a backstop."""
 
 REQUEST_TIMEOUT = 30.0
 STDERR_TAIL = 4000
@@ -229,8 +236,11 @@ def venv_command(identifier: str, before: set, spec: dict) -> list[str]:
 class StdioSession:
     """One JSON-RPC conversation with a server over its stdin/stdout."""
 
-    def __init__(self, command: list[str], env: dict[str, str]) -> None:
+    def __init__(
+        self, command: list[str], env: dict[str, str], deadline: float | None = None
+    ) -> None:
         """Spawn the server."""
+        self.deadline = deadline
         self.stderr: list[str] = []
         try:
             # The command is the thing under test; it runs sinkholed and capped.
@@ -274,6 +284,8 @@ class StdioSession:
         self._write(message)
 
         deadline = time.monotonic() + REQUEST_TIMEOUT
+        if self.deadline is not None:
+            deadline = min(deadline, self.deadline)
         while time.monotonic() < deadline:
             line = self._readline(deadline)
             try:
@@ -289,6 +301,8 @@ class StdioSession:
                 raise Failed("protocol_error", f"{method}: {error.get('message')}")
             result = payload.get("result")
             return result if isinstance(result, dict) else {}
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise Failed("timeout", f"probe budget of {PROBE_BUDGET:.0f}s exhausted on {method}")
         raise Failed("timeout", f"no response to {method} within {REQUEST_TIMEOUT:.0f}s")
 
     def notify(self, method: str) -> None:
@@ -356,7 +370,9 @@ class StdioSession:
             self.process.kill()
 
 
-def probe_once(command: list[str], env: dict[str, str]) -> tuple[dict, str]:
+def probe_once(
+    command: list[str], env: dict[str, str], deadline: float | None = None
+) -> tuple[dict, str]:
     """One launch, one manifest. Returns the manifest and the stderr tail.
 
     A failure carries the server's stderr out with it. "exited with code 1" on
@@ -364,7 +380,9 @@ def probe_once(command: list[str], env: dict[str, str]) -> tuple[dict, str]:
     it no longer has, or a newer runtime, and that distinction is the whole
     point of reporting a failure taxonomy rather than a success rate.
     """
-    session = StdioSession(command, env)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise Failed("timeout", f"probe budget of {PROBE_BUDGET:.0f}s exhausted before launch")
+    session = StdioSession(command, env, deadline)
     try:
         return session.collect(), session.stderr_tail()
     except Failed as exc:
@@ -462,6 +480,7 @@ def main() -> int:
         "used_placeholders": False,
     }
     started = time.monotonic()
+    deadline = started + PROBE_BUDGET
     used_placeholders = False
     try:
         # An explicit command in the spec wins, which is how the containment
@@ -472,7 +491,7 @@ def main() -> int:
                 command = json.load(handle)
         result["command"] = command
         try:
-            first, stderr = probe_once(command, build_env(spec, placeholders=False))
+            first, stderr = probe_once(command, build_env(spec, placeholders=False), deadline)
         except Failed as bare:
             # A server that will not start without its declared variables is a
             # documented population, not a failure to hide. Retry once with
@@ -481,9 +500,9 @@ def main() -> int:
                 raise
             used_placeholders = True
             result["bare_launch_error"] = f"{bare.klass}: {bare.detail[:500]}"
-            first, stderr = probe_once(command, build_env(spec, placeholders=True))
+            first, stderr = probe_once(command, build_env(spec, placeholders=True), deadline)
 
-        second, _ = probe_once(command, build_env(spec, placeholders=used_placeholders))
+        second, _ = probe_once(command, build_env(spec, placeholders=used_placeholders), deadline)
         result["probes"] = [first, second]
         result["used_placeholders"] = used_placeholders
         result["stderr_tail"] = stderr
