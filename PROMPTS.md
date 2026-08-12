@@ -11,7 +11,7 @@ Shared context to keep in mind across all packages:
 >
 > **Verified scale (full pagination, 675 pages):** 20,453 unique servers · 67,425 version rows · 8,294 servers with >1 version · ~46,970 already-existing version transitions · 10,345 servers with remote endpoints · 10,826 shipping as packages · 233 withdrawn. This is ~11x larger than any published MCP census.
 >
-> **Environment — authoring is local, production is the VPS.** Write code in this directory with normal file tools; deploy and run on the VPS. `ssh mcpwatch` → `[redacted-user]@[redacted-ip]` (`[redacted-host]`), key auth, non-interactive, remote root `~/code/mcpwatch/`. VPS has Ubuntu 24.04.4, 4 vCPU / 7.6 GB / 53 GB free, Python 3.12.3, uv 0.12.2, Docker 29.4.3 (usable without sudo — `[redacted-user]` is in the `docker` group), systemd **user** units with `Linger=yes`. **`sudo` needs a password, so no `apt install`.** fail2ban is active — connect once and read the error, never loop usernames. See `CLAUDE.md` and `BUILD-PLAN.md` §1.
+> **Environment — authoring is local, production is the VPS.** Write code in this directory with normal file tools; deploy and run on the VPS. `ssh mcpwatch` (alias in the local `~/.ssh/config`), key auth, non-interactive, remote root `~/code/mcpwatch/`. VPS has Ubuntu 24.04.4, 4 vCPU / 7.6 GB / 53 GB free, Python 3.12.3, uv 0.12.2, Docker 29.4.3 (usable without sudo), systemd **user** units with `Linger=yes`. **`sudo` needs a password, so no `apt install`.** SSH has brute-force protection — connect once and read the error, never loop usernames. See `CLAUDE.md` and `BUILD-PLAN.md` §1.
 
 ---
 
@@ -369,7 +369,7 @@ workflow — registry operator and maintainer first, 90-day window.
 ```
 Extend MCPWatch's Layer-2 coverage to package-distributed servers. Read BUILD-PLAN.md.
 WP1–WP7 complete. Requires Docker — already installed on the VPS (29.4.3) and usable without
-sudo, since `[redacted-user]` is in the `docker` group. Run there, not on the Windows box.
+sudo. Run there, not on the Windows box.
 
 WHY: 10,345 registry servers expose remote HTTP endpoints and are covered by WP3. A further
 10,826 ship as npm / PyPI / OCI packages over stdio and are currently invisible to the
@@ -406,9 +406,8 @@ BUILD `mcpwatch.sandbox`:
 SAFETY — this package executes untrusted third-party code, so treat the sandbox as the deliverable:
 - Verify egress containment with a deliberately-exfiltrating test server before running any real one
 - Verify the container cannot reach host filesystem or Docker socket
-- CRITICAL: the VPS is NOT disposable. It is a permanent box shared with other agent workloads
-  (`[redacted-workload]`, `.claude`, `.codex`, `.gemini`, and `[redacted-workload]`/`[redacted-workload]`/`[redacted-workload]`
-  in `~/code`) and it holds the MCPWatch corpus, which is irreplaceable. You are executing
+- CRITICAL: the VPS is NOT disposable. It is a permanent box shared with other workloads that
+  matter, and it holds the MCPWatch corpus, which is irreplaceable. You are executing
   untrusted third-party code on a machine that matters. Escalate containment accordingly: verify
   isolation before the first real package, never mount the host filesystem or Docker socket, cap
   CPU/memory/PIDs, and keep the corpus directory unreachable from any container. If stronger

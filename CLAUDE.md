@@ -15,7 +15,7 @@ Write and edit code here with the normal file tools — they operate on the loca
 editing over SSH through Bash heredocs is slow and error-prone. Then deploy and run on the VPS.
 
 ```
-ssh mcpwatch        # → [redacted-user]@[redacted-ip] ([redacted-host]), key auth, non-interactive
+ssh mcpwatch        # alias in the local ~/.ssh/config; key auth, non-interactive
 git push vps main   # deploy: post-receive hook checks out into ~/code/mcpwatch
 ```
 
@@ -50,14 +50,13 @@ manifests) cannot be backfilled. A missed day is gone permanently.
 ## Hard constraints on the VPS
 
 - **`sudo` requires a password.** No `apt install` from an agent session. Not a blocker —
-  Docker is installed with `[redacted-user]` in the `docker` group, systemd **user** units run with
-  `Linger=yes` (timers survive logout and reboot), and uv installs to `~/.local/bin`.
-- **fail2ban is active.** Repeated SSH auth failures ban the connecting IP, and recovery needs
-  console access. Connect once and read the error — never loop over candidate usernames.
-- **The box is shared** with other agent workloads (`[redacted-workload]` process; `.claude`, `.codex`,
-  `.gemini` in `$HOME`; `[redacted-workload]`, `[redacted-workload]`, `[redacted-workload]` in `~/code`). It is a
-  permanent machine that matters, not a disposable sandbox. Keep MCPWatch in its own directory,
-  use user-level systemd units, cap resources, and be conservative when running untrusted code.
+  Docker is usable without sudo, systemd **user** units run with `Linger=yes` (timers survive
+  logout and reboot), and uv installs to `~/.local/bin`.
+- **SSH has brute-force protection.** Repeated auth failures ban the connecting IP, and recovery
+  needs console access. Connect once and read the error — never loop over candidate usernames.
+- **The box is shared** with other workloads and is a permanent machine that matters, not a
+  disposable sandbox. Keep MCPWatch in its own directory, use user-level systemd units, cap
+  resources, and be conservative when running untrusted code.
 
 ## Working rules
 

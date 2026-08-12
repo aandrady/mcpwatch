@@ -75,8 +75,8 @@ WP3's double-probe nondeterminism guard doubles the daily third-party request lo
 
 Both blocking decisions are settled. The production host is provisioned and verified.
 
-**Host:** `[redacted-user]@[redacted-ip]` (`[redacted-host]`), reachable from a dev session as `ssh mcpwatch`
-via the local `~/.ssh/config` alias (ed25519 key, no passphrase, non-interactive).
+**Host:** a dedicated Linux VPS, reachable from a dev session as `ssh mcpwatch` via the local
+`~/.ssh/config` alias (ed25519 key, no passphrase, non-interactive).
 
 | Property | Value |
 |---|---|
@@ -89,7 +89,7 @@ via the local `~/.ssh/config` alias (ed25519 key, no passphrase, non-interactive
 
 **Key constraint: `sudo` requires a password, so no `apt install` from an agent session.** This turns out not to matter — everything needed is already present or installs to userspace:
 
-- **Docker 29.4.3** installed, and `[redacted-user]` is in the `docker` group → WP8/WP9 unblocked, no sudo
+- **Docker 29.4.3** installed and usable without sudo → WP8/WP9 unblocked
 - **systemd *user* units** running with `Linger=yes` → daily timers survive logout and reboot, no sudo
 - **uv 0.12.2** installed to `~/.local/bin` (already on PATH)
 - **Python 3.12.3** with built-in `sqlite3` 3.45.1 → the missing `sqlite3` CLI is irrelevant
@@ -97,9 +97,9 @@ via the local `~/.ssh/config` alias (ed25519 key, no passphrase, non-interactive
 
 **Verified end-to-end from the VPS** (`~/code/mcpwatch/smoke_test.py`): registry pagination (100 servers / 0.73s), the `/versions` history endpoint, and a live MCP `initialize` + `tools/list` handshake enumerating 9 tools. Both data layers are collectable from this host today.
 
-**Note for WP4:** the box is shared with other agent workloads (`[redacted-workload]`, `.claude`, `.codex`, `.gemini` in `$HOME`). Isolate MCPWatch under its own directory and user-level systemd units, and keep resource caps modest so a runaway crawl cannot disrupt co-tenants. Backup remains in scope for WP4 as planned rather than as an emergency.
+**Note for WP4:** the box is shared with other workloads. Isolate MCPWatch under its own directory and user-level systemd units, and keep resource caps modest so a runaway crawl cannot disrupt co-tenants. Backup remains in scope for WP4 as planned rather than as an emergency.
 
-**Operational note:** SSH is protected by fail2ban. Rapid repeated auth failures will ban the connecting IP. Do not loop over candidate usernames — connect once, read the error.
+**Operational note:** SSH has brute-force protection. Rapid repeated auth failures will ban the connecting IP. Do not loop over candidate usernames — connect once, read the error.
 
 ---
 
