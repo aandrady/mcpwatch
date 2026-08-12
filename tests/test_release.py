@@ -345,3 +345,28 @@ class TestPublishedDirectoryNamesNobody:
         from mcpwatch.release.cli import _publishable
 
         assert _publishable(None) is None
+
+    def test_the_concentration_finding_survives_without_naming_the_publisher(self):
+        from mcpwatch.release.cli import _publishable_pinning
+
+        rows = _publishable_pinning(
+            [
+                {
+                    "policy": "whole_manifest",
+                    "largest_publisher": "io.github.someone",
+                    "largest_publisher_share": 0.7,
+                    "friction_ratio_excluding_largest": 1.4,
+                }
+            ]
+        )
+        assert "io.github.someone" not in json.dumps(rows)
+        # The methodological point is the share and the adjusted ratio, not who.
+        assert rows[0]["largest_publisher_share"] == 0.7
+        assert rows[0]["friction_ratio_excluding_largest"] == 1.4
+
+    def test_a_policy_without_a_concentration_finding_is_untouched(self):
+        from mcpwatch.release.cli import _publishable_pinning
+
+        assert _publishable_pinning([{"policy": "x", "blocked": 1}]) == [
+            {"policy": "x", "blocked": 1}
+        ]

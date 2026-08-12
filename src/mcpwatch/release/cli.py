@@ -66,6 +66,26 @@ def _publishable(divergence: dict[str, Any] | None) -> dict[str, Any] | None:
     return {k: v for k, v in divergence.items() if k in PUBLISHABLE_DIVERGENCE_KEYS}
 
 
+def _publishable_pinning(policies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the named publisher from the concentration finding.
+
+    The concentration itself is the methodological point and stays: what share
+    of catches came from one operator, and what the ratio becomes without them.
+    The operator's identity is not the point, and naming a publisher beside a
+    column headed "caught" in a security report reads as an accusation whatever
+    the surrounding prose says. It is an ambiguous case, and FRAMING rule 6 says
+    ambiguous cases are not named. The console report, which the operator reads
+    and does not publish, keeps the name.
+    """
+    published = []
+    for policy in policies:
+        row = dict(policy)
+        if row.pop("largest_publisher", None) is not None:
+            row["largest_publisher"] = "withheld pending disclosure policy"
+        published.append(row)
+    return published
+
+
 def _latest_divergence(corpus: Corpus) -> dict[str, Any] | None:
     """The most recent WP9 run's stats, if one has been recorded."""
     row = corpus.index.connection.execute(
@@ -167,7 +187,7 @@ def _build(args: argparse.Namespace) -> int:
                 "layers": [m.as_json() for m in layers],
                 "pinning": {
                     "layer": str(pin_layer),
-                    "policies": [o.as_json() for o in outcomes],
+                    "policies": _publishable_pinning([o.as_json() for o in outcomes]),
                 },
                 "divergence": _publishable(divergence),
             },
