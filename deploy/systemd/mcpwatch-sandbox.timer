@@ -1,0 +1,15 @@
+[Unit]
+Description=Nightly MCPWatch package-server sandbox cycle
+
+[Timer]
+# 07:00, after everything else has finished rather than merely after it starts.
+# A measured 400-member cycle at concurrency 2 runs a little over two hours, so
+# this occupies roughly 07:00-09:15 — clear of the manifest probe (03:30, ~40
+# min), the backup (05:16) and the health check (06:00). Nothing else on this
+# box should be competing for the four cores while untrusted code is running.
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
