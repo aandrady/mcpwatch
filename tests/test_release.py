@@ -188,6 +188,13 @@ class TestMetrics:
         assert metrics.changed == 0
         assert metrics.quarantined_transitions == 1
 
+    def test_collection_window_and_history_span_are_reported_separately(self):
+        # Layer 1 is collected for days and covers years. Reporting only the
+        # collection window would understate it by three orders of magnitude.
+        payload = summarise_changesets([], layer="registry", days=5.3, span=1400.0).as_json()
+        assert payload["observation_days"] == 5.3
+        assert payload["history_span_days"] == 1400.0
+
     def test_a_layer2_report_carries_its_window_and_forbids_annualising(self):
         payload = summarise_changesets([], layer="manifest", days=5.0).as_json()
         assert payload["observation_days"] == 5.0
