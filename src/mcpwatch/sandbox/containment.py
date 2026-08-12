@@ -1,0 +1,399 @@
+"""The sandbox itself — WP8's actual deliverable.
+
+The collection host is not disposable. It is a permanent machine shared with
+other workloads and it holds the corpus, which cannot be re-collected. This
+module therefore treats containment as the product and manifest enumeration as
+a consequence of it, rather than the other way round.
+
+**The lifecycle, and why it has two phases.** A package must be fetched from a
+registry, which needs egress; the server it installs must never have any. Docker
+can move a *running* container between networks, so one container spans both:
+
+1. Start on ``mcpwatch-install``, a normal bridge network. Install the pinned
+   version with lifecycle scripts disabled, so no publisher code executes while
+   egress exists.
+2. Disconnect from that network and connect to ``mcpwatch-sinkhole``, an
+   ``--internal`` network whose only other member is our sinkhole container.
+3. Launch the server and enumerate. Every name it resolves answers with the
+   sinkhole's address and every connection it opens is recorded there.
+4. Kill the container. It was ``--rm`` and had no mounts, so nothing survives.
+
+An internal network cannot route off the host, so egress is denied by the
+network's construction rather than by rules that could be mis-ordered. The
+sinkhole exists to turn a denied connection into a recorded one — WP8 counts
+egress attempted during mere enumeration as a finding, and a finding needs
+evidence.
+
+**What a probe container gets:** no mounts of any kind, every capability
+dropped, ``no-new-privileges``, a fixed non-root uid, and hard caps on memory,
+CPU, and PIDs. The corpus is not mounted, the Docker socket is not mounted, and
+there is no host path in the container's configuration to be tricked into
+following.
+
+**What it does not get:** a read-only rootfs. The package has to be installed
+into the container's own filesystem, and the alternatives (a shared volume, or
+committing an image between phases) both add a durable artifact that outlives
+the container. An ephemeral writable layer with no mounts, no capabilities, and
+no network is the smaller risk, and it is destroyed with the container.
+"""
+
+import json
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+__all__ = [
+    "INSTALL_NETWORK",
+    "PROBE_IMAGE",
+    "SINKHOLE_IMAGE",
+    "SINKHOLE_NETWORK",
+    "ContainmentError",
+    "Sandbox",
+    "SandboxResult",
+    "docker",
+]
+
+PROBE_IMAGE = "mcpwatch/probe:0.1.0"
+SINKHOLE_IMAGE = "mcpwatch/sinkhole:0.1.0"
+SINKHOLE_NETWORK = "mcpwatch-sinkhole"
+INSTALL_NETWORK = "mcpwatch-install"
+SINKHOLE_CONTAINER = "mcpwatch-sinkhole"
+
+MEMORY_LIMIT = "1g"
+CPU_LIMIT = "1.0"
+PID_LIMIT = "256"
+"""Caps chosen against a 4-vCPU box shared with workloads that matter.
+
+One CPU and a gigabyte lets a Node or Python server start comfortably while
+leaving a runaway unable to disturb a co-tenant. The PID cap is what stops a
+fork bomb, which is the cheapest denial-of-service a hostile package can attempt.
+"""
+
+INSTALL_TIMEOUT = 600.0
+PROBE_TIMEOUT = 300.0
+SENTINEL = "===MCPWATCH-RESULT==="
+
+
+class ContainmentError(RuntimeError):
+    """The sandbox could not be established, or stopped being trustworthy.
+
+    Raised rather than degraded. Every caller's correct response is to stop:
+    probing third-party code without verified containment is the one thing this
+    package exists to prevent.
+    """
+
+
+def docker(
+    *args: str, timeout: float = 120.0, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Run one docker command."""
+    executable = shutil.which("docker")
+    if executable is None:  # pragma: no cover - environment-dependent
+        msg = "docker is not on PATH"
+        raise ContainmentError(msg)
+    # argv is constructed here and never shell-interpolated.
+    result = subprocess.run(
+        [executable, *args], capture_output=True, text=True, timeout=timeout, check=False
+    )
+    if check and result.returncode != 0:
+        msg = f"docker {' '.join(args[:3])} failed: {(result.stderr or result.stdout).strip()}"
+        raise ContainmentError(msg)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxResult:
+    """What one sandboxed probe produced."""
+
+    server_key: str
+    status: str
+    probes: tuple[dict[str, Any], ...] = ()
+    command: tuple[str, ...] = ()
+    used_placeholders: bool = False
+    detail: str | None = None
+    stderr_tail: str | None = None
+    egress: tuple[dict[str, Any], ...] = ()
+    seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        """Whether two manifests came back."""
+        return self.status == "ok" and len(self.probes) == 2
+
+    @property
+    def attempted_egress(self) -> bool:
+        """Whether the server reached for the network during enumeration.
+
+        A reportable finding in itself: nothing about listing tools requires a
+        connection, so a server that opens one during enumeration is doing
+        something it did not need to do.
+        """
+        return any(event.get("kind") == "tcp" for event in self.egress)
+
+
+@dataclass
+class Sandbox:
+    """Builds, verifies, and runs the containment described in this module."""
+
+    repo_root: Path
+    probe_image: str = PROBE_IMAGE
+    sinkhole_image: str = SINKHOLE_IMAGE
+    memory: str = MEMORY_LIMIT
+    cpus: str = CPU_LIMIT
+    pids: str = PID_LIMIT
+    _sinkhole_ip: str = field(default="", init=False)
+    _log_mark: int = field(default=0, init=False)
+
+    # ------------------------------------------------------------- lifecycle ---
+
+    def build(self) -> None:
+        """Build both images. Idempotent; Docker's layer cache does the work."""
+        sandbox_dir = self.repo_root / "deploy" / "sandbox"
+        docker("build", "-t", self.sinkhole_image, str(sandbox_dir / "sinkhole"), timeout=600.0)
+        docker("build", "-t", self.probe_image, str(sandbox_dir / "probe"), timeout=900.0)
+
+    def ensure_networks(self) -> None:
+        """Create both networks, the sinkhole one strictly internal.
+
+        ``--internal`` is the containment property that does not depend on us
+        getting anything else right: Docker installs no route off the host for
+        such a network, so a probe container has nowhere to send a packet even
+        if every other control failed.
+        """
+        existing = docker("network", "ls", "--format", "{{.Name}}").stdout.split()
+        if SINKHOLE_NETWORK not in existing:
+            docker("network", "create", "--internal", SINKHOLE_NETWORK)
+        if INSTALL_NETWORK not in existing:
+            docker("network", "create", INSTALL_NETWORK)
+
+        # Verified rather than assumed: a network created without --internal by
+        # an earlier build would silently give every probe real egress.
+        internal = docker(
+            "network", "inspect", SINKHOLE_NETWORK, "--format", "{{.Internal}}"
+        ).stdout.strip()
+        if internal != "true":
+            msg = (
+                f"network {SINKHOLE_NETWORK} is not internal; refusing to run. "
+                f"Remove it (docker network rm {SINKHOLE_NETWORK}) and let this rebuild it."
+            )
+            raise ContainmentError(msg)
+
+    def start_sinkhole(self) -> str:
+        """Start the sinkhole if it is not already up, and return its address."""
+        running = docker(
+            "ps", "--filter", f"name=^{SINKHOLE_CONTAINER}$", "--format", "{{.Names}}"
+        ).stdout.strip()
+        if not running:
+            docker("rm", "-f", SINKHOLE_CONTAINER, check=False)
+            docker(
+                "run",
+                "-d",
+                "--name",
+                SINKHOLE_CONTAINER,
+                "--network",
+                SINKHOLE_NETWORK,
+                # The one capability grant in this package, and it is to our own
+                # container: a single iptables REDIRECT so one socket can catch
+                # every destination port. Probe containers get --cap-drop ALL.
+                "--cap-add",
+                "NET_ADMIN",
+                "--memory",
+                "256m",
+                "--pids-limit",
+                "128",
+                "--restart",
+                "unless-stopped",
+                self.sinkhole_image,
+            )
+            time.sleep(2.0)
+
+        address = docker(
+            "inspect",
+            SINKHOLE_CONTAINER,
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+        ).stdout.strip()
+        if not address:
+            msg = "sinkhole container has no address on the sandbox network"
+            raise ContainmentError(msg)
+        self._sinkhole_ip = address
+        return address
+
+    def setup(self) -> None:
+        """Build images, create networks, start the sinkhole."""
+        self.build()
+        self.ensure_networks()
+        self.start_sinkhole()
+
+    @property
+    def sinkhole_ip(self) -> str:
+        """The sinkhole's address on the sandbox network.
+
+        Every name a probe container resolves must answer with this, which is
+        what :mod:`~mcpwatch.sandbox.verify` asserts.
+        """
+        return str(self._sinkhole_ip)
+
+    # ----------------------------------------------------------------- probe ---
+
+    def run_flags(self, name: str) -> list[str]:
+        """The hardening applied to every probe container.
+
+        Enumerated in one place so the containment test and the real probe
+        cannot drift apart — the test asserts against a container started with
+        exactly these flags.
+        """
+        return [
+            "--name",
+            name,
+            "--network",
+            INSTALL_NETWORK,
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            self.memory,
+            "--memory-swap",
+            self.memory,  # equal to --memory: no swap headroom
+            "--cpus",
+            self.cpus,
+            "--pids-limit",
+            self.pids,
+            # No -v, no --mount, no --privileged, and no docker.sock. The corpus
+            # is not reachable because it is not named here and nothing in the
+            # image knows where it lives.
+        ]
+
+    def probe(self, spec: dict[str, Any]) -> SandboxResult:
+        """Install and enumerate one package server inside the sandbox."""
+        if not self._sinkhole_ip:
+            self.start_sinkhole()
+        name = f"mcpwatch-probe-{spec['server_key'].replace('/', '-').replace('.', '-')[:48]}"
+        docker("rm", "-f", name, check=False)
+        started = time.monotonic()
+
+        try:
+            docker(
+                "run",
+                "-d",
+                *self.run_flags(name),
+                "-e",
+                f"MCPWATCH_SPEC={json.dumps(spec)}",
+                "--entrypoint",
+                "sleep",
+                self.probe_image,
+                str(INSTALL_TIMEOUT + PROBE_TIMEOUT + 60),
+            )
+            self.mark_sinkhole()
+
+            install = self.exec_driver(name, "install", timeout=INSTALL_TIMEOUT)
+            if install.get("status") != "ok":
+                return self._result(spec, install, started)
+
+            # Egress is cut here, before any third-party code runs.
+            self._isolate(name)
+
+            probe = self.exec_driver(name, "probe", timeout=PROBE_TIMEOUT)
+            probe["egress"] = self.collect_egress()
+            return self._result(spec, probe, started)
+        finally:
+            docker("rm", "-f", name, check=False, timeout=60.0)
+
+    def _isolate(self, name: str) -> None:
+        """Move a running container from the install network to the sinkhole.
+
+        Verified, not assumed. If the container is still attached to anything
+        with a route off the host after this, the caller must not proceed to
+        launch third-party code inside it.
+        """
+        docker("network", "disconnect", INSTALL_NETWORK, name)
+        docker("network", "connect", SINKHOLE_NETWORK, name)
+
+        attached = docker(
+            "inspect",
+            name,
+            "--format",
+            "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+        ).stdout.split()
+        if attached != [SINKHOLE_NETWORK]:
+            msg = f"container {name} is attached to {attached}, expected only {SINKHOLE_NETWORK}"
+            raise ContainmentError(msg)
+
+    def exec_driver(self, name: str, mode: str, *, timeout: float) -> dict[str, Any]:
+        """Run one driver phase and parse its result."""
+        result = docker(
+            "exec", name, "python3", "/srv/probe/driver.py", mode, timeout=timeout, check=False
+        )
+        _, _, payload = result.stdout.partition(SENTINEL)
+        line = payload.strip().splitlines()
+        if not line:
+            return {
+                "status": "crashed",
+                "detail": (result.stderr or result.stdout or "no output")[-2000:],
+            }
+        try:
+            parsed = json.loads(line[-1])
+        except ValueError:
+            return {"status": "crashed", "detail": f"unparseable driver output: {line[-1][:500]}"}
+        return parsed if isinstance(parsed, dict) else {"status": "crashed", "detail": "not a dict"}
+
+    # --------------------------------------------------------------- sinkhole ---
+
+    def mark_sinkhole(self) -> None:
+        """Record where the sinkhole log currently ends.
+
+        Attempts are attributed by position rather than by source address: the
+        log is shared, and a container's address is recycled between probes.
+        """
+        result = docker(
+            "exec",
+            SINKHOLE_CONTAINER,
+            "sh",
+            "-c",
+            "wc -l < /var/log/sinkhole/attempts.jsonl 2>/dev/null || echo 0",
+            check=False,
+        )
+        self._log_mark = int(result.stdout.strip() or 0)
+
+    def collect_egress(self) -> list[dict[str, Any]]:
+        """Everything the sinkhole recorded since the last mark."""
+        mark = self._log_mark
+        result = docker(
+            "exec",
+            SINKHOLE_CONTAINER,
+            "sh",
+            "-c",
+            f"tail -n +{mark + 1} /var/log/sinkhole/attempts.jsonl 2>/dev/null || true",
+            check=False,
+        )
+        events: list[dict[str, Any]] = []
+        for line in result.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("kind") in ("dns", "tcp"):
+                events.append(event)
+        return events
+
+    @staticmethod
+    def _result(spec: dict[str, Any], payload: dict[str, Any], started: float) -> SandboxResult:
+        """Fold a driver payload into a typed result."""
+        probes = payload.get("probes") or []
+        return SandboxResult(
+            server_key=spec["server_key"],
+            status=str(payload.get("status", "crashed")),
+            probes=tuple(p for p in probes if isinstance(p, dict)),
+            command=tuple(payload.get("command") or ()),
+            used_placeholders=bool(payload.get("used_placeholders")),
+            detail=payload.get("detail") or payload.get("bare_launch_error"),
+            stderr_tail=payload.get("stderr_tail"),
+            egress=tuple(payload.get("egress") or ()),
+            seconds=round(time.monotonic() - started, 2),
+        )
