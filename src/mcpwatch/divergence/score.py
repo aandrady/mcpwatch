@@ -128,6 +128,14 @@ class DivergenceReport:
     call timed out. Excluded from the denominator: a tool that never ran is not
     a tool that diverged, and counting it either way would be a claim."""
 
+    launch_failures: dict[str, int] = field(default_factory=dict)
+    """Why servers never reached the exercise, by status.
+
+    Reported because it bounds what the rate can be generalised to. A sample
+    where half the servers would not start is measuring the half that did, and
+    that has to be visible next to the number.
+    """
+
     def add(self, findings: list[Finding]) -> None:
         """Record one tool's findings."""
         self.findings.extend(findings)
@@ -167,6 +175,7 @@ class DivergenceReport:
             "tools_exercised": self.tools_exercised,
             "tools_skipped": self.tools_skipped,
             "tools_unexercised": self.unexercised,
+            "launch_failures": dict(sorted(self.launch_failures.items())),
             "diverging_tools": self.diverging_tools,
             "divergence_rate": round(rate, 4),
             "ci95": [round(low, 4), round(high, 4)],
@@ -189,6 +198,11 @@ class DivergenceReport:
             lines.append("")
             for name, count in self.by_class().items():
                 lines.append(f"  {name:34} {count:4} tools")
+        if self.launch_failures:
+            lines.append("")
+            lines.append("  servers that never started:")
+            for status, count in sorted(self.launch_failures.items(), key=lambda kv: -kv[1]):
+                lines.append(f"    {count:4}  {status}")
         if self.skip_reasons:
             lines.append("")
             lines.append("  not exercised:")

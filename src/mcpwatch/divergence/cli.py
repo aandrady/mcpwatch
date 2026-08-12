@@ -30,6 +30,9 @@ from .score import DivergenceReport, Finding, score_tool
 
 __all__ = ["main"]
 
+COLLECTOR = "divergence"
+COLLECTOR_VERSION = "0.1.0"
+
 FIXTURE_PATH = "/srv/probe/known_behavior.py"
 
 EXPECTED: dict[str, set[Capability]] = {
@@ -189,24 +192,39 @@ def _run(args: argparse.Namespace) -> int:
             print("no enumerated stdio manifests yet; run the WP8 probe first", file=sys.stderr)
             return 1
 
-        for server_key, tools in targets:
-            selected, skipped = select_tools(tools)
-            report.tools_skipped += len(skipped)
-            for _, reason in skipped:
-                report.skip_reasons[reason] = report.skip_reasons.get(reason, 0) + 1
-            if not selected:
-                continue
+        # Recorded as a run like every other measurement, so the rate is
+        # reproducible from the corpus and covered by the backup rather than
+        # living in whatever file the operator happened to redirect to.
+        run_id = corpus.start_run(COLLECTOR, COLLECTOR_VERSION)
+        try:
+            for server_key, tools in targets:
+                selected, skipped = select_tools(tools)
+                report.tools_skipped += len(skipped)
+                for _, reason in skipped:
+                    report.skip_reasons[reason] = report.skip_reasons.get(reason, 0) + 1
+                if not selected:
+                    continue
 
-            plan = [
-                {"tool": t["name"], "arguments": synthesize_arguments(t.get("inputSchema"))}
-                for t in selected
-            ]
-            payload = sandbox.exercise(specs[server_key], plan)
-            report.servers_exercised += 1
-            answered = {str(c.get("tool")) for c in payload.get("calls") or []}
-            report.tools_exercised += len(answered)
-            report.unexercised += len(selected) - len(answered)
-            report.add(_analyse(payload, selected, server_key))
+                plan = [
+                    {"tool": t["name"], "arguments": synthesize_arguments(t.get("inputSchema"))}
+                    for t in selected
+                ]
+                payload = sandbox.exercise(specs[server_key], plan)
+                status = str(payload.get("status") or "crashed")
+                if status != "ok":
+                    # The server never got far enough to be measured. Counted as
+                    # unexercised rather than as zero divergence, which would
+                    # quietly deflate the rate.
+                    report.unexercised += len(selected)
+                    report.launch_failures[status] = report.launch_failures.get(status, 0) + 1
+                    continue
+                report.servers_exercised += 1
+                answered = {str(c.get("tool")) for c in payload.get("calls") or []}
+                report.tools_exercised += len(answered)
+                report.unexercised += len(selected) - len(answered)
+                report.add(_analyse(payload, selected, server_key))
+        finally:
+            corpus.finish_run(run_id, stats=report.as_json())
 
     print(report.render())
     if args.json:
