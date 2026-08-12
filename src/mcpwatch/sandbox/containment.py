@@ -81,7 +81,16 @@ fork bomb, which is the cheapest denial-of-service a hostile package can attempt
 """
 
 INSTALL_TIMEOUT = 600.0
-PROBE_TIMEOUT = 300.0
+
+PROBE_TIMEOUT = 420.0
+"""Backstop on one `docker exec` of the probe phase.
+
+Set above the driver's own 240s budget plus teardown, deliberately. The driver
+is the component that knows how to stop probing and still report; this timeout
+firing means the driver itself is wedged, which is a different failure and worth
+distinguishing. At 300s it fired routinely on merely-slow servers, and the
+exception propagated out of a worker and ended a 400-member cycle at member 99.
+"""
 SENTINEL = "===MCPWATCH-RESULT==="
 
 
@@ -345,45 +354,73 @@ class Sandbox:
         for name in (installer, prober):
             docker("rm", "-f", name, check=False)
         try:
-            docker(
-                "run",
-                "-d",
-                *self.run_flags(installer, isolated=False),
-                *environment,
-                "--entrypoint",
-                "sleep",
-                self.probe_image,
-                str(INSTALL_TIMEOUT + 60),
+            return self._probe_inner(spec, installer, prober, image, environment, started)
+        except ContainmentError:
+            # The one failure that must stop everything. Containment is not
+            # negotiable per server, and the rest of the sample is not worth
+            # probing in a sandbox that just stopped being trustworthy.
+            raise
+        except Exception as exc:
+            # Everything else becomes this server's outcome. A 400-member cycle
+            # running unattended cannot be ended by one container behaving in a
+            # way we did not anticipate — which is exactly how the first full
+            # run died at member 99.
+            return SandboxResult(
+                server_key=spec["server_key"],
+                status="crashed",
+                detail=f"{type(exc).__name__}: {exc}"[:2000],
+                seconds=round(time.monotonic() - started, 2),
             )
-            install = self.exec_driver(installer, "install", timeout=INSTALL_TIMEOUT)
-            if install.get("status") != "ok":
-                return self._result(spec, install, started)
-
-            docker("commit", installer, image, timeout=300.0)
-            docker("rm", "-f", installer, check=False, timeout=60.0)
-
-            # From here on, publisher code runs. It has no route off the host
-            # and every name it resolves answers with the sinkhole.
-            docker(
-                "run",
-                "-d",
-                *self.run_flags(prober, isolated=True),
-                *environment,
-                "--entrypoint",
-                "sleep",
-                image,
-                str(PROBE_TIMEOUT + 60),
-            )
-            self._assert_isolated(prober)
-            self.mark_sinkhole()
-
-            result = self.exec_driver(prober, "probe", timeout=PROBE_TIMEOUT)
-            result["egress"] = self.collect_egress()
-            return self._result(spec, result, started)
         finally:
             for name in (installer, prober):
                 docker("rm", "-f", name, check=False, timeout=60.0)
             docker("rmi", "-f", image, check=False, timeout=120.0)
+
+    def _probe_inner(
+        self,
+        spec: dict[str, Any],
+        installer: str,
+        prober: str,
+        image: str,
+        environment: list[str],
+        started: float,
+    ) -> SandboxResult:
+        """Body of :meth:`probe`, without the cleanup and failure translation."""
+        docker(
+            "run",
+            "-d",
+            *self.run_flags(installer, isolated=False),
+            *environment,
+            "--entrypoint",
+            "sleep",
+            self.probe_image,
+            str(INSTALL_TIMEOUT + 60),
+        )
+        install = self.exec_driver(installer, "install", timeout=INSTALL_TIMEOUT)
+        if install.get("status") != "ok":
+            return self._result(spec, install, started)
+
+        docker("commit", installer, image, timeout=300.0)
+        docker("rm", "-f", installer, check=False, timeout=60.0)
+
+        # From here on, publisher code runs. It has no route off the host and
+        # every name it resolves answers with the sinkhole.
+        docker(
+            "run",
+            "-d",
+            *self.run_flags(prober, isolated=True),
+            *environment,
+            "--entrypoint",
+            "sleep",
+            image,
+            str(PROBE_TIMEOUT + 60),
+        )
+        self._assert_isolated(prober)
+        self.mark_sinkhole()
+
+        result = self.exec_driver(prober, "probe", timeout=PROBE_TIMEOUT)
+        result["egress"] = self.collect_egress()
+        return self._result(spec, result, started)
 
     def _assert_isolated(self, name: str) -> None:
         """Refuse to run publisher code in a container with a way out.
@@ -402,10 +439,21 @@ class Sandbox:
             raise ContainmentError(msg)
 
     def exec_driver(self, name: str, mode: str, *, timeout: float) -> dict[str, Any]:
-        """Run one driver phase and parse its result."""
-        result = docker(
-            "exec", name, "python3", "/srv/probe/driver.py", mode, timeout=timeout, check=False
-        )
+        """Run one driver phase and parse its result.
+
+        A timeout is an outcome, not an exception. The driver normally bounds
+        itself and reports; reaching this means it is wedged, and one wedged
+        container must not end the cycle.
+        """
+        try:
+            result = docker(
+                "exec", name, "python3", "/srv/probe/driver.py", mode, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "timeout",
+                "detail": f"the {mode} phase did not return within {timeout:.0f}s",
+            }
         _, _, payload = result.stdout.partition(SENTINEL)
         line = payload.strip().splitlines()
         if not line:
