@@ -21,7 +21,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from mcpwatch.diff import Change, ChangeKind, ChangeSet, SeverityFlag
+from mcpwatch.diff import Change, ChangeKind, ChangeSet
 from mcpwatch.diff.text import looks_like_network, split_identifier
 
 from .taxonomy import Label, most_severe
@@ -202,6 +202,30 @@ def _param_name(change: Change) -> str:
     return split_identifier(change.path.rsplit("/", 1)[-1])
 
 
+def _annotation_reversal(change: Change) -> str | None:
+    """Name the annotation a server explicitly reversed, or None.
+
+    The distinction this draws was found by running the rule over the corpus:
+    of the first twenty hits, all but two were ``None -> {readOnlyHint: true}``
+    — a publisher declaring annotations for the first time, which is metadata
+    being filled in, not a guard being lowered. Reading the WP6 triage flag was
+    what conflated them; that flag is deliberately over-inclusive because it
+    only orders a review queue, and a rule that assigns a label cannot borrow
+    it.
+
+    A reversal requires the previous value to have been explicitly the other
+    way: ``destructiveHint`` true -> false, or ``readOnlyHint`` false -> true.
+    A first declaration is neither.
+    """
+    before = change.before if isinstance(change.before, dict) else {}
+    after = change.after if isinstance(change.after, dict) else {}
+    if before.get("destructiveHint") is True and after.get("destructiveHint") is False:
+        return "destructiveHint true -> false"
+    if before.get("readOnlyHint") is False and after.get("readOnlyHint") is True:
+        return "readOnlyHint false -> true"
+    return None
+
+
 def _enum_of(value: object) -> set[str]:
     if isinstance(value, dict):
         enum = value.get("enum")
@@ -262,14 +286,12 @@ def evaluate(changeset: ChangeSet) -> list[RuleHit]:
                     RuleHit("enum_widened", Label.SCOPE_EXPANSION, False, ", ".join(sorted(gained)))
                 )
 
-    if SeverityFlag.DESTRUCTIVE_HINT_CLEARED in changeset.flags:
-        hits.append(
-            RuleHit("annotation_downgraded", Label.AUTHORITY_ESCALATION, True, "destructiveHint")
-        )
-    elif SeverityFlag.READONLY_HINT_SET in changeset.flags:
-        hits.append(
-            RuleHit("annotation_downgraded", Label.AUTHORITY_ESCALATION, True, "readOnlyHint")
-        )
+        elif change.kind is ChangeKind.ANNOTATION_CHANGED:
+            reversal = _annotation_reversal(change)
+            if reversal is not None:
+                hits.append(
+                    RuleHit("annotation_downgraded", Label.AUTHORITY_ESCALATION, True, reversal)
+                )
 
     if any(c.kind is ChangeKind.ENDPOINT_CHANGED for c in changeset.changes):
         hits.append(RuleHit("endpoint_moved", Label.EXFILTRATION_ADDITION, False, "server/remotes"))

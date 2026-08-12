@@ -117,8 +117,43 @@ class TestRules:
     def test_a_cleared_destructive_hint_is_settled(self):
         label, _ = classify(
             changeset(
-                Change(kind=ChangeKind.ANNOTATION_CHANGED, path="tools/read/annotations"),
+                Change(
+                    kind=ChangeKind.ANNOTATION_CHANGED,
+                    path="tools/read/annotations",
+                    before={"destructiveHint": True},
+                    after={"destructiveHint": False},
+                ),
                 flags=(SeverityFlag.DESTRUCTIVE_HINT_CLEARED,),
+            )
+        )
+        assert label is Label.AUTHORITY_ESCALATION
+
+    def test_declaring_annotations_for_the_first_time_is_not_a_downgrade(self):
+        # Found on the real corpus: 18 of the first 20 hits were a publisher
+        # filling in metadata that had never been set, not lowering a guard.
+        label, hits = classify(
+            changeset(
+                Change(
+                    kind=ChangeKind.ANNOTATION_CHANGED,
+                    path="tools/read/annotations",
+                    before=None,
+                    after={"readOnlyHint": True, "destructiveHint": False},
+                ),
+                flags=(SeverityFlag.READONLY_HINT_SET,),
+            )
+        )
+        assert label is None
+        assert not [h for h in hits if h.confident]
+
+    def test_an_explicit_readonly_reversal_is_settled(self):
+        label, _ = classify(
+            changeset(
+                Change(
+                    kind=ChangeKind.ANNOTATION_CHANGED,
+                    path="tools/read/annotations",
+                    before={"readOnlyHint": False},
+                    after={"readOnlyHint": True},
+                )
             )
         )
         assert label is Label.AUTHORITY_ESCALATION
