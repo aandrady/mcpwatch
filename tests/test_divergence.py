@@ -12,12 +12,18 @@ to pin down that an ambiguous description resolves toward *declared*, because
 the failure that matters here is a false accusation.
 """
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from mcpwatch.divergence import (
+    MODEL_ID,
+    PROMPT_VERSION,
     Capability,
     CapabilityProfile,
     DivergenceReport,
+    LlmDeclaredExtractor,
     Unfillable,
     declared_from_schema,
     declared_from_text,
@@ -369,3 +375,87 @@ class TestReport:
 
     def test_an_empty_report_renders_without_dividing_by_zero(self):
         assert "0/0" in DivergenceReport().render()
+
+
+# ---------------------------------------------------------------- model layer ---
+
+
+class FakeMessages:
+    """Records the request and returns a canned structured response."""
+
+    def __init__(self, payload: dict, stop_reason: str = "end_turn") -> None:
+        self.payload = payload
+        self.stop_reason = stop_reason
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            stop_reason=self.stop_reason,
+            content=[SimpleNamespace(type="text", text=json.dumps(self.payload))],
+        )
+
+
+class FakeClient:
+    def __init__(self, payload: dict, stop_reason: str = "end_turn") -> None:
+        self.messages = FakeMessages(payload, stop_reason)
+
+
+WEATHER = {
+    "name": "current_conditions",
+    "description": "Returns the current weather for a city.",
+    "inputSchema": {"properties": {"city": {"type": "string"}}},
+}
+
+
+class TestModelLayer:
+    """The model may only widen what counts as declared."""
+
+    def test_it_adds_a_capability_the_rules_could_not_read(self):
+        # "Returns the current weather" declares network to a reader and
+        # nothing at all to a regex.
+        client = FakeClient({"declared": [{"capability": "network", "cited_text": "weather"}]})
+        rules = declared_profile(WEATHER)
+        assert Capability.NETWORK not in rules
+        augmented = LlmDeclaredExtractor(client).augment(WEATHER, rules)
+        assert Capability.NETWORK in augmented
+
+    def test_it_can_never_remove_a_declaration_the_rules_found(self):
+        # The safety property: a drifting model can only make this harness less
+        # accusatory, never more.
+        client = FakeClient({"declared": []})
+        rules = declared_profile({"name": "fetch_url", "description": "Downloads a file."})
+        augmented = LlmDeclaredExtractor(client).augment({"name": "fetch_url"}, rules)
+        assert rules.capabilities <= augmented.capabilities
+
+    def test_a_failure_leaves_the_rules_answer_standing(self):
+        class Broken:
+            @property
+            def messages(self):
+                raise RuntimeError("no api key")
+
+        rules = declared_profile({"name": "fetch_url", "description": ""})
+        assert LlmDeclaredExtractor(Broken()).augment({}, rules).capabilities == rules.capabilities
+
+    def test_a_refusal_leaves_the_rules_answer_standing(self):
+        client = FakeClient({"declared": []}, stop_reason="refusal")
+        rules = CapabilityProfile()
+        assert LlmDeclaredExtractor(client).augment(WEATHER, rules).capabilities == frozenset()
+
+    def test_an_unknown_capability_name_is_ignored_not_fatal(self):
+        client = FakeClient({"declared": [{"capability": "telepathy", "cited_text": "x"}]})
+        assert LlmDeclaredExtractor(client).extract(WEATHER).capabilities == frozenset()
+
+    def test_the_pinned_model_and_prompt_are_sent_and_recorded(self):
+        client = FakeClient({"declared": [{"capability": "network", "cited_text": "weather"}]})
+        profile = LlmDeclaredExtractor(client).extract(WEATHER)
+        assert client.messages.calls[0]["model"] == MODEL_ID
+        assert MODEL_ID in profile.reasons(Capability.NETWORK)[0]
+        assert PROMPT_VERSION in profile.reasons(Capability.NETWORK)[0]
+
+    def test_repeating_a_tool_does_not_repeat_the_call(self):
+        client = FakeClient({"declared": []})
+        extractor = LlmDeclaredExtractor(client)
+        extractor.extract(WEATHER)
+        extractor.extract(WEATHER)
+        assert len(client.messages.calls) == 1

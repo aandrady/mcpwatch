@@ -11,6 +11,9 @@ Four modules, mirroring the two halves of the comparison and what joins them:
 * :mod:`~mcpwatch.divergence.declared` — what a tool's description, schema and
   annotations claim. Rules-based and deliberately generous, so an ambiguous
   description resolves toward "declared" and a divergence goes unreported.
+  :mod:`~mcpwatch.divergence.llm` adds a pinned-model pass for prose the rules
+  cannot read; it may only *add* declarations, so the worst a drifting model can
+  do is make this harness less accusatory.
 * :mod:`~mcpwatch.divergence.protocol` — which tools may be invoked at all, and
   with what. The ethics of this package live here.
 * :mod:`~mcpwatch.divergence.observe` — what a tool actually did, from syscalls
@@ -25,6 +28,7 @@ is imported by them or run by a scheduled unit.
 
 from .capabilities import DIVERGENCE_CLASS, Capability, CapabilityProfile
 from .declared import declared_from_schema, declared_from_text, declared_profile
+from .llm import MODEL_ID, PROMPT_SHA, PROMPT_VERSION, LlmDeclaredExtractor
 from .observe import TraceEvent, observed_profile, parse_sinkhole, parse_strace
 from .protocol import Decision, Unfillable, may_exercise, select_tools, synthesize_arguments
 from .score import CAVEATS, DivergenceReport, Finding, score_tool, wilson_interval
@@ -32,11 +36,15 @@ from .score import CAVEATS, DivergenceReport, Finding, score_tool, wilson_interv
 __all__ = [
     "CAVEATS",
     "DIVERGENCE_CLASS",
+    "MODEL_ID",
+    "PROMPT_SHA",
+    "PROMPT_VERSION",
     "Capability",
     "CapabilityProfile",
     "Decision",
     "DivergenceReport",
     "Finding",
+    "LlmDeclaredExtractor",
     "TraceEvent",
     "Unfillable",
     "declared_from_schema",
