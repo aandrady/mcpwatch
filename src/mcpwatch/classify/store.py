@@ -24,9 +24,9 @@ from pathlib import Path
 
 from mcpwatch.store import to_iso, utcnow
 
-__all__ = ["Adjudication", "ClassifyStore", "MachineLabel"]
+__all__ = ["Adjudication", "CalibrationFrame", "ClassifyStore", "MachineLabel"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -86,10 +86,32 @@ END;
 -- The fixed calibration set. Fixed is the point: reliability measured over a
 -- set that drifts is not comparable month to month, and monthly re-adjudication
 -- against a moving target would measure the sample rather than the classifier.
+--
+-- `layer` is part of an item's identity, not decoration. A change_id is only
+-- resolvable back to a ChangeSet by re-running the diff engine over the layer
+-- it came from, so an item that does not carry its layer is an item a reviewer
+-- cannot open.
 CREATE TABLE IF NOT EXISTS calibration_item (
     change_id  TEXT PRIMARY KEY,
     added_at   TEXT NOT NULL,
-    stratum    TEXT
+    stratum    TEXT,
+    layer      TEXT
+);
+
+-- How each draw was made. The set is a research artifact, and a reviewer asking
+-- "how were these 200 chosen?" has to be answerable from the corpus rather than
+-- from shell history — so the seed, the layer, the target size and the pool the
+-- draw ran against are recorded at the moment of drawing. Append-only: a second
+-- draw adds a row, and the sequence of rows is the set's provenance.
+CREATE TABLE IF NOT EXISTS calibration_frame (
+    frame_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    layer        TEXT NOT NULL,
+    seed         INTEGER NOT NULL,
+    size         INTEGER NOT NULL,
+    pool_total   INTEGER NOT NULL,
+    pool_flagged INTEGER NOT NULL,
+    added        INTEGER NOT NULL,
+    created_at   TEXT NOT NULL
 );
 """
 
@@ -121,6 +143,18 @@ class Adjudication:
     seconds_spent: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CalibrationFrame:
+    """The sampling frame one draw of the calibration set ran under."""
+
+    layer: str
+    seed: int
+    size: int
+    pool_total: int
+    pool_flagged: int
+    added: int
+
+
 class ClassifyStore:
     """SQLite store for classifications, adjudications, and the calibration set."""
 
@@ -134,11 +168,29 @@ class ClassifyStore:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)"
-            " ON CONFLICT(key) DO NOTHING",
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
+
+    def _migrate(self) -> None:
+        """Bring an existing store up to :data:`SCHEMA_VERSION`.
+
+        Additive only, and driven by what the table actually has rather than by
+        the recorded version number, matching
+        :meth:`mcpwatch.store.index.ObservationIndex._migrate`. Adjudications are
+        append-only and irreplaceable, so a migration never rewrites a row.
+
+        A v1 store's calibration items predate the ``layer`` column and cannot
+        have it inferred — the layer is not recoverable from a change_id alone —
+        so they are left null and :meth:`pending_for` reports them as such.
+        """
+        info = self._conn.execute("PRAGMA table_xinfo(calibration_item)")
+        columns = {row["name"] for row in info}
+        if "layer" not in columns:
+            self._conn.execute("ALTER TABLE calibration_item ADD COLUMN layer TEXT")
 
     def close(self) -> None:
         """Close the connection."""
@@ -306,18 +358,47 @@ class ClassifyStore:
 
     # ------------------------------------------------------- calibration set ---
 
-    def add_calibration_items(self, items: Mapping[str, str | None]) -> int:
-        """Add change_ids to the fixed calibration set. Returns how many were new."""
+    def add_calibration_items(self, items: Mapping[str, str | None], *, layer: str) -> int:
+        """Add change_ids to the fixed calibration set. Returns how many were new.
+
+        ``INSERT OR IGNORE``, so re-drawing never disturbs an item already under
+        adjudication — the set only ever grows, and the frame rows record why.
+        """
         added = 0
         stamp = to_iso(utcnow())
         for change_id, stratum in items.items():
             cursor = self._conn.execute(
-                "INSERT OR IGNORE INTO calibration_item(change_id, added_at, stratum)"
-                " VALUES(?, ?, ?)",
-                (change_id, stamp, stratum),
+                "INSERT OR IGNORE INTO calibration_item(change_id, added_at, stratum, layer)"
+                " VALUES(?, ?, ?, ?)",
+                (change_id, stamp, stratum, layer),
             )
             added += cursor.rowcount or 0
         return added
+
+    def add_calibration_frame(self, frame: CalibrationFrame) -> int:
+        """Record how one draw was made, and return its id."""
+        cursor = self._conn.execute(
+            """
+            INSERT INTO calibration_frame(
+                layer, seed, size, pool_total, pool_flagged, added, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                frame.layer,
+                frame.seed,
+                frame.size,
+                frame.pool_total,
+                frame.pool_flagged,
+                frame.added,
+                to_iso(utcnow()),
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def calibration_frames(self) -> list[sqlite3.Row]:
+        """Every draw that has contributed to the set, oldest first."""
+        return self._conn.execute("SELECT * FROM calibration_frame ORDER BY frame_id").fetchall()
 
     def calibration_set(self) -> list[sqlite3.Row]:
         """The fixed calibration set, in insertion order."""
@@ -325,11 +406,15 @@ class ClassifyStore:
             "SELECT * FROM calibration_item ORDER BY added_at, change_id"
         ).fetchall()
 
-    def pending_for(self, rater: str) -> list[str]:
-        """Calibration items this rater has not yet labelled."""
-        rows = self._conn.execute(
+    def pending_for(self, rater: str) -> list[sqlite3.Row]:
+        """Calibration items this rater has not yet labelled, with their layer.
+
+        Rows rather than ids: a reviewer can only open an item by re-deriving it
+        from the layer it was drawn from, so the caller needs both.
+        """
+        return self._conn.execute(
             """
-            SELECT c.change_id FROM calibration_item c
+            SELECT c.change_id, c.layer, c.stratum FROM calibration_item c
             WHERE NOT EXISTS (
                 SELECT 1 FROM adjudication a
                 WHERE a.change_id = c.change_id AND a.rater = ?
@@ -338,4 +423,3 @@ class ClassifyStore:
             """,
             (rater,),
         ).fetchall()
-        return [row["change_id"] for row in rows]

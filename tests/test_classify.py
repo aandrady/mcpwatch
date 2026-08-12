@@ -15,6 +15,7 @@ from mcpwatch.classify import (
     MODEL_ID,
     PROMPT_SHA,
     Adjudication,
+    CalibrationFrame,
     ClassifyStore,
     Label,
     LlmClassifier,
@@ -313,10 +314,48 @@ class TestStore:
         assert rows == 2
 
     def test_pending_tracks_each_rater_separately(self, store):
-        store.add_calibration_items({"c1": "flagged", "c2": "unflagged"})
+        store.add_calibration_items({"c1": "flagged", "c2": "unflagged"}, layer="manifest")
         store.add_adjudication(Adjudication("c1", "alice", "benign"))
-        assert store.pending_for("alice") == ["c2"]
-        assert store.pending_for("bob") == ["c1", "c2"]
+        assert [row["change_id"] for row in store.pending_for("alice")] == ["c2"]
+        assert [row["change_id"] for row in store.pending_for("bob")] == ["c1", "c2"]
+
+    def test_a_calibration_item_carries_the_layer_it_was_drawn_from(self, store):
+        store.add_calibration_items({"c1": "flagged"}, layer="registry")
+        assert store.pending_for("alice")[0]["layer"] == "registry"
+
+    def test_the_sampling_frame_is_recorded_with_the_draw(self, store):
+        store.add_calibration_items({"c1": "flagged"}, layer="manifest")
+        store.add_calibration_frame(
+            CalibrationFrame(
+                layer="manifest",
+                seed=20260812,
+                size=200,
+                pool_total=2772,
+                pool_flagged=995,
+                added=1,
+            )
+        )
+        (frame,) = store.calibration_frames()
+        assert (frame["seed"], frame["layer"], frame["pool_flagged"]) == (20260812, "manifest", 995)
+
+    def test_redrawing_never_disturbs_an_item_already_being_adjudicated(self, store):
+        store.add_calibration_items({"c1": "flagged"}, layer="manifest")
+        added = store.add_calibration_items({"c1": "unflagged", "c2": "flagged"}, layer="manifest")
+        assert added == 1
+        assert store.pending_for("alice")[0]["stratum"] == "flagged"
+
+    def test_a_v1_store_migrates_without_touching_its_adjudications(self, tmp_path):
+        path = tmp_path / "v1.db"
+        with ClassifyStore(path) as opened:
+            opened.connection.execute("ALTER TABLE calibration_item DROP COLUMN layer")
+            opened.connection.execute(
+                "INSERT INTO calibration_item(change_id, added_at, stratum)"
+                " VALUES('c1', '2026-08-01T00:00:00+00:00', 'flagged')"
+            )
+            opened.add_adjudication(Adjudication("c1", "alice", "benign"))
+        with ClassifyStore(path) as reopened:
+            assert reopened.rater_labels("alice") == {"c1": "benign"}
+            assert reopened.calibration_set()[0]["layer"] is None
 
 
 # ----------------------------------------------------------------------- llm ---
