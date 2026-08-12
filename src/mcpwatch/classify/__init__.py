@@ -23,7 +23,7 @@ from .llm import MODEL_ID, LlmClassifier, LlmVerdict
 from .prompt_v1 import PROMPT_SHA, PROMPT_VERSION
 from .reliability import Agreement, cohens_kappa, per_class_kappa, score
 from .rules import RULES, Rule, RuleHit, classify, evaluate
-from .store import Adjudication, ClassifyStore, MachineLabel
+from .store import Adjudication, CalibrationFrame, ClassifyStore, MachineLabel
 from .taxonomy import PRECEDENCE, Label, definition, definitions_block, most_severe
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "RULES",
     "Adjudication",
     "Agreement",
+    "CalibrationFrame",
     "ClassifyStore",
     "Label",
     "LlmClassifier",

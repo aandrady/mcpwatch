@@ -31,7 +31,7 @@ from . import reliability
 from .llm import MODEL_ID, LlmClassifier
 from .rules import classify as rule_classify
 from .rules import describe, evaluate
-from .store import Adjudication, ClassifyStore, MachineLabel
+from .store import Adjudication, CalibrationFrame, ClassifyStore, MachineLabel
 from .taxonomy import Label, definition
 
 __all__ = ["main"]
@@ -89,12 +89,33 @@ def _sample(args: argparse.Namespace) -> int:
     items = {c.change_id: ("flagged" if c.flags else "unflagged") for c in chosen}
 
     with ClassifyStore(_store_path(args.corpus)) as store:
-        added = store.add_calibration_items(items)
+        existing = store.calibration_set()
+        # A set already under adjudication is the expensive thing in this
+        # project, and a second draw silently enlarging it would change what the
+        # reported kappa is measured over. Growing it has to be deliberate.
+        if existing and not args.extend:
+            print(
+                f"calibration set already holds {len(existing)} item(s); "
+                "pass --extend to add to it",
+                file=sys.stderr,
+            )
+            return 1
+        added = store.add_calibration_items(items, layer=args.layer)
+        store.add_calibration_frame(
+            CalibrationFrame(
+                layer=args.layer,
+                seed=args.seed,
+                size=args.size,
+                pool_total=len(pool),
+                pool_flagged=len(flagged),
+                added=added,
+            )
+        )
         total = len(store.calibration_set())
 
     print(
-        f"pool {len(pool)} changesets ({len(flagged)} flagged) -> "
-        f"added {added}, calibration set now {total}"
+        f"layer {args.layer}, seed {args.seed}: pool {len(pool)} changesets "
+        f"({len(flagged)} flagged) -> added {added}, calibration set now {total}"
     )
     if total < CALIBRATION_TARGET:
         print(f"note: the gate is stated over {CALIBRATION_TARGET} items", file=sys.stderr)
@@ -210,30 +231,41 @@ def _adjudicate(args: argparse.Namespace) -> int:
         if not pending:
             print(f"nothing pending for rater {args.rater!r}")
             return 0
-        wanted = set(pending)
-        pool = {
-            c.change_id: c for c in _changesets(corpus, Layer(args.layer)) if c.change_id in wanted
-        }
+
+        # Each item is resolved against the layer it was drawn from, not against
+        # a --layer flag. An item is only findable in its own layer's diff, so
+        # taking the layer from the flag would silently skip the whole set the
+        # first time someone ran this with the default.
+        wanted: dict[str, set[str]] = {}
+        for row in pending:
+            wanted.setdefault(row["layer"] or args.layer, set()).add(row["change_id"])
+        pool: dict[str, ChangeSet] = {}
+        for layer, ids in wanted.items():
+            pool.update(
+                {c.change_id: c for c in _changesets(corpus, Layer(layer)) if c.change_id in ids}
+            )
 
         choices = list(Label)
         print(
             f"{len(pending)} items pending for {args.rater}. Ctrl-C to stop; progress is saved.\n"
         )
-        for index, change_id in enumerate(pending, start=1):
+        for index, row in enumerate(pending, start=1):
+            change_id = row["change_id"]
             changeset = pool.get(change_id)
             if changeset is None:
-                print(f"[{index}] {change_id}: not present in this layer's diff — skipping")
+                layer = row["layer"] or args.layer
+                print(f"[{index}] {change_id}: not present in the {layer} diff — skipping")
                 continue
             hits = evaluate(changeset)
             print(f"\n[{index}/{len(pending)}] {change_id}")
             print(_render(changeset, list(hits)))
 
             if args.show_llm:
-                row = store.machine_label(change_id, source="llm")
-                if row is not None:
+                said = store.machine_label(change_id, source="llm")
+                if said is not None:
                     print("-" * 78)
-                    print(f"model said: {row['label']} ({row['confidence']})")
-                    print(f"  {row['rationale']}")
+                    print(f"model said: {said['label']} ({said['confidence']})")
+                    print(f"  {said['rationale']}")
 
             print("-" * 78)
             for number, label in enumerate(choices, start=1):
@@ -341,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
     sample.add_argument("--size", type=int, default=CALIBRATION_TARGET)
     sample.add_argument(
         "--seed", type=int, default=20260812, help="fixed so the draw is reproducible"
+    )
+    sample.add_argument(
+        "--extend",
+        action="store_true",
+        help="add to an existing calibration set instead of refusing; changes what "
+        "the reported kappa is measured over",
     )
     sample.set_defaults(func=_sample)
 
