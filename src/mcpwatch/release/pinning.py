@@ -336,15 +336,18 @@ def render(outcomes: list[PolicyOutcome], *, layer: str, transitions: int) -> st
     if top is not None and top[2] >= 0.2:
         namespace, count, share = top
         adjusted = outcomes[0].ratio_excluding(namespace)
+        shown = "undefined" if adjusted is None else f"{adjusted:,.1f}"
         lines += [
             "",
-            f"CONCENTRATION WARNING: {share:.0%} of catches ({count:,}) come from one",
-            f"publisher, {namespace}. Publishers here are not independent samples — one",
-            "operator can own hundreds of servers and push an identical edit to all of",
-            "them in a day, which a naive count reads as hundreds of separate catches.",
-            f"Excluding that publisher entirely, the friction ratio is "
-            f"{'undefined' if adjusted is None else f'{adjusted:,.1f}'} rather than "
-            f"{outcomes[0].ratio():,.1f}.",
+            f"CONCENTRATION WARNING: {share:.0%} of catches ({count:,}) come from a",
+            f"single publisher, {namespace}.",
+            "",
+            "Publishers here are not independent samples. One operator can own",
+            "hundreds of servers and push an identical edit to all of them in a day,",
+            "which a naive count reads as hundreds of separate catches. Excluding",
+            f"that publisher entirely, the friction ratio is {shown} rather than",
+            f"{outcomes[0].ratio():,.1f} — a sensitivity check, not a correction, since",
+            "those transitions did happen.",
         ]
 
     distinct = {(o.blocked, o.passed, o.caught) for o in outcomes}
