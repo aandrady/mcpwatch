@@ -30,12 +30,17 @@ __all__ = ["main"]
 COLLECTOR = "sandbox"
 COLLECTOR_VERSION = "0.1.0"
 
-DEFAULT_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 2
 """Simultaneous probe containers.
 
-One per vCPU on a 4-vCPU box that is shared. Each container is already capped at
-one CPU and a gigabyte, so this bounds the sandbox's total footprint at roughly
-half the machine even when every slot is busy.
+Measured, not guessed. Four was the obvious choice on a 4-vCPU box and it took
+the whole machine: two installs pegged a core each, and `docker commit` adds
+image-layer compression on top, leaving 8.9% idle and a load average of 6.3 for
+an hour. That box is permanent and shared with workloads that matter, so the
+sandbox does not get to use all of it.
+
+Two leaves roughly half the machine free. The cycle takes about twice as long,
+which is the correct trade for a nightly job with no deadline.
 """
 
 
