@@ -26,7 +26,6 @@ stderr is captured and a tail returned as evidence for the failure taxonomy.
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -43,6 +42,9 @@ LAUNCH_TIMEOUT = 90.0
 
 REQUEST_TIMEOUT = 30.0
 STDERR_TAIL = 4000
+
+NODE_PREFIX = "/srv/server"
+VENV = "/srv/server/venv"
 
 PLACEHOLDER = "mcpwatch-placeholder-not-a-real-credential"
 """What a required env var gets when a server refuses to start without one.
@@ -78,43 +80,99 @@ def install(spec: dict) -> list[str]:
     registry = spec["registry_type"]
     identifier = spec["identifier"]
     version = spec.get("version")
-    pinned = f"{identifier}@{version}" if registry == "npm" and version else identifier
-    if registry == "pypi" and version:
-        pinned = f"{identifier}=={version}"
 
     if registry == "npm":
-        cmd = ["npm", "install", "--ignore-scripts", "--no-save", "--prefix", "/srv/server", pinned]
-    elif registry == "pypi":
-        cmd = ["pip", "install", "--no-cache-dir", "--target", "/srv/server/pylib", pinned]
-    else:
-        raise Failed("install_failed", f"unsupported registry type {registry!r}")
+        pinned = f"{identifier}@{version}" if version else identifier
+        run(
+            ["npm", "install", "--ignore-scripts", "--no-save", "--prefix", NODE_PREFIX, pinned],
+            "install_failed",
+        )
+        return npm_command(identifier)
+    if registry == "pypi":
+        pinned = f"{identifier}=={version}" if version else identifier
+        # A venv, not `pip install --target`. `--target` does not generate the
+        # console-script entry points a server declares, so the launcher would
+        # have to guess a module name from the distribution name — which is what
+        # the first version did, and it is wrong often enough to dominate the
+        # failure taxonomy with our bugs instead of the ecosystem's.
+        run([sys.executable, "-m", "venv", VENV], "install_failed")
+        before = set(os.listdir(f"{VENV}/bin"))
+        run([f"{VENV}/bin/pip", "install", "--no-cache-dir", pinned], "install_failed")
+        return venv_command(identifier, before)
+    raise Failed("install_failed", f"unsupported registry type {registry!r}")
 
+
+def run(cmd: list[str], klass: str) -> None:
+    """Run an install step, raising with its output on failure."""
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
     if result.returncode != 0:
-        raise Failed("install_failed", (result.stderr or result.stdout)[-STDERR_TAIL:])
-    return launch_command(spec)
+        raise Failed(klass, (result.stderr or result.stdout)[-STDERR_TAIL:])
 
 
-def launch_command(spec: dict) -> list[str]:
-    """Work out how to start the installed server."""
-    explicit = spec.get("command")
-    if explicit:
-        return list(explicit)
-    registry = spec["registry_type"]
-    identifier = spec["identifier"]
-    if registry == "npm":
-        # The package's own bin entry, resolved from the install prefix rather
-        # than by asking npx to go back to the network — which it cannot do here.
-        binary = identifier.split("/")[-1]
-        candidate = f"/srv/server/node_modules/.bin/{binary}"
-        if os.path.exists(candidate):
-            return [candidate]
-        found = shutil.which(binary, path="/srv/server/node_modules/.bin")
-        if found:
-            return [found]
-        raise Failed("launch_failed", f"no bin entry for {identifier} in node_modules/.bin")
-    module = identifier.replace("-", "_")
-    return [sys.executable, "-m", module]
+def npm_command(identifier: str) -> list[str]:
+    """Resolve an npm package's launch command from its own ``package.json``.
+
+    The ``bin`` field, not the package name. A scoped package almost never has
+    a bin entry matching the last path segment (``@perplexity-ai/mcp-server``
+    ships ``perplexity-mcp``), and guessing produced 8 spurious
+    ``launch_failed`` results in the first validation run.
+
+    Invoked through ``node`` rather than executed directly: the entry point is a
+    JavaScript file whose executable bit and shebang are whatever the publisher's
+    tarball happened to carry, and one of them was missing both.
+    """
+    manifest = os.path.join(NODE_PREFIX, "node_modules", identifier, "package.json")
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise Failed("launch_failed", f"unreadable package.json for {identifier}: {exc}") from exc
+
+    entry = data.get("bin")
+    if isinstance(entry, dict):
+        entry = next(iter(entry.values()), None)
+    if not isinstance(entry, str):
+        # No bin field. `main` is the module a consumer would import, and a
+        # stdio server frequently ships as exactly that.
+        entry = data.get("main")
+    if not isinstance(entry, str):
+        raise Failed("launch_failed", f"{identifier} declares neither bin nor main")
+
+    path = os.path.join(NODE_PREFIX, "node_modules", identifier, entry)
+    if not os.path.exists(path):
+        raise Failed("launch_failed", f"{identifier} points at {entry}, which is not installed")
+    return ["node", path]
+
+
+def venv_command(identifier: str, before: set) -> list[str]:
+    """Find the console script a PyPI distribution installed into the venv.
+
+    Identified by what appeared in ``bin`` during the install rather than by
+    transforming the distribution name: the two differ often, and the set
+    difference is exact.
+    """
+    after = set(os.listdir(f"{VENV}/bin"))
+    scripts = sorted(after - before - {"__pycache__"})
+    if scripts:
+        # Prefer a script whose name resembles the distribution when a package
+        # installs several, so the choice is stable across cycles.
+        stem = identifier.replace("_", "-").lower()
+        scripts.sort(key=lambda name: (stem not in name.lower(), name))
+        return [f"{VENV}/bin/{scripts[0]}"]
+
+    # No console script. Fall back to the module, which is what `python -m`
+    # would run, trying both spellings of the distribution name.
+    for module in (identifier.replace("-", "_"), identifier):
+        probe = subprocess.run(
+            [f"{VENV}/bin/python", "-c", f"import importlib.util as u; u.find_spec('{module}')"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return [f"{VENV}/bin/python", "-m", module]
+    raise Failed("launch_failed", f"{identifier} installed no console script and no import matched")
 
 
 # --------------------------------------------------------------------- probe ---
@@ -127,7 +185,8 @@ class StdioSession:
         """Spawn the server."""
         self.stderr: list[str] = []
         try:
-            self.process = subprocess.Popen(  # noqa: S603 - the command is the thing under test
+            # The command is the thing under test; it runs sinkholed and capped.
+            self.process = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -265,10 +324,9 @@ def build_env(spec: dict, *, placeholders: bool) -> dict[str, str]:
     package declared is supplied as an obvious placeholder or not at all.
     """
     env = {
-        "PATH": "/srv/server/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": f"{VENV}/bin:{NODE_PREFIX}/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
         "HOME": "/home/prober",
-        "NODE_PATH": "/srv/server/node_modules",
-        "PYTHONPATH": "/srv/server/pylib",
+        "NODE_PATH": f"{NODE_PREFIX}/node_modules",
         "MCPWATCH_SANDBOX": "1",
     }
     if placeholders:
