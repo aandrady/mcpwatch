@@ -5,24 +5,31 @@ other workloads and it holds the corpus, which cannot be re-collected. This
 module therefore treats containment as the product and manifest enumeration as
 a consequence of it, rather than the other way round.
 
-**The lifecycle, and why it has two phases.** A package must be fetched from a
-registry, which needs egress; the server it installs must never have any. Docker
-can move a *running* container between networks, so one container spans both:
+**The lifecycle, and why it takes two containers.** A package must be fetched
+from a registry, which needs egress; the server it installs must never have any.
 
-1. Start on ``mcpwatch-install``, a normal bridge network. Install the pinned
-   version with lifecycle scripts disabled, so no publisher code executes while
-   egress exists.
-2. Disconnect from that network and connect to ``mcpwatch-sinkhole``, an
-   ``--internal`` network whose only other member is our sinkhole container.
-3. Launch the server and enumerate. Every name it resolves answers with the
-   sinkhole's address and every connection it opens is recorded there.
-4. Kill the container. It was ``--rm`` and had no mounts, so nothing survives.
+1. An *install* container on ``mcpwatch-install``, an ordinary bridge network
+   with working DNS. It installs the pinned version with lifecycle scripts
+   disabled, so no publisher code executes while egress exists.
+2. ``docker commit`` freezes that filesystem into an ephemeral image, and the
+   install container is destroyed.
+3. A *probe* container runs that image on ``mcpwatch-sinkhole``, an
+   ``--internal`` network whose only other member is our sinkhole, with the
+   sinkhole as its only resolver. This is where publisher code finally runs.
+4. Both containers and the staged image are removed. Nothing crosses between
+   them but the committed filesystem — no volume, no mount, no host path.
+
+The split is forced by ``--dns``, which is fixed when a container is created.
+One container cannot have working DNS for the install and sinkholed DNS for the
+probe, and without the sinkholed resolver a server's connection attempts fail at
+name resolution and are never recorded — indistinguishable, in the data, from a
+server that never tried. That is the failure this design exists to avoid, and it
+is why the first version of it did not survive its own containment test.
 
 An internal network cannot route off the host, so egress is denied by the
 network's construction rather than by rules that could be mis-ordered. The
-sinkhole exists to turn a denied connection into a recorded one — WP8 counts
-egress attempted during mere enumeration as a finding, and a finding needs
-evidence.
+sinkhole turns a denied connection into a recorded one: WP8 counts egress
+attempted during mere enumeration as a finding, and a finding needs evidence.
 
 **What a probe container gets:** no mounts of any kind, every capability
 dropped, ``no-new-privileges``, a fixed non-root uid, and hard caps on memory,
@@ -31,10 +38,10 @@ there is no host path in the container's configuration to be tricked into
 following.
 
 **What it does not get:** a read-only rootfs. The package has to be installed
-into the container's own filesystem, and the alternatives (a shared volume, or
-committing an image between phases) both add a durable artifact that outlives
-the container. An ephemeral writable layer with no mounts, no capabilities, and
-no network is the smaller risk, and it is destroyed with the container.
+into a filesystem the server can then run from, and a server that cannot write
+its own working directory fails in ways unrelated to what is being measured. An
+ephemeral writable layer with no mounts, no capabilities, and no route off the
+host is the smaller risk, and it is destroyed with the container.
 """
 
 import json
@@ -182,11 +189,24 @@ class Sandbox:
             raise ContainmentError(msg)
 
     def start_sinkhole(self) -> str:
-        """Start the sinkhole if it is not already up, and return its address."""
-        running = docker(
-            "ps", "--filter", f"name=^{SINKHOLE_CONTAINER}$", "--format", "{{.Names}}"
+        """Start the sinkhole if it is not already up to date, and return its address.
+
+        Health and image identity are both checked, not just presence. A
+        container in ``Restarting`` shows up in ``docker ps`` while being
+        useless, and one started from a previous build keeps running the old
+        image after ``build()`` has replaced it — both happened, and both
+        present as "the sinkhole recorded nothing", which reads like a
+        containment pass if the checks are not looking for it.
+        """
+        state = docker(
+            "inspect", SINKHOLE_CONTAINER, "--format", "{{.State.Running}} {{.Image}}", check=False
+        ).stdout.split()
+        wanted = docker(
+            "image", "inspect", self.sinkhole_image, "--format", "{{.Id}}"
         ).stdout.strip()
-        if not running:
+        healthy = len(state) == 2 and state[0] == "true" and state[1] == wanted
+
+        if not healthy:
             docker("rm", "-f", SINKHOLE_CONTAINER, check=False)
             docker(
                 "run",
@@ -239,18 +259,33 @@ class Sandbox:
 
     # ----------------------------------------------------------------- probe ---
 
-    def run_flags(self, name: str) -> list[str]:
+    def run_flags(self, name: str, *, isolated: bool = True) -> list[str]:
         """The hardening applied to every probe container.
 
         Enumerated in one place so the containment test and the real probe
         cannot drift apart — the test asserts against a container started with
         exactly these flags.
+
+        Args:
+            name: Container name.
+            isolated: Join the sinkhole network with the sinkhole as the only
+                resolver. False puts the container on the install network with
+                ordinary DNS, which is only ever used for the install phase,
+                before any publisher code runs.
         """
+        network = [
+            "--network",
+            SINKHOLE_NETWORK if isolated else INSTALL_NETWORK,
+        ]
+        if isolated:
+            # The reason the phases cannot share a container: --dns is fixed at
+            # create time, and pointing it at the sinkhole would leave the
+            # install phase unable to resolve the package registry.
+            network += ["--dns", self._sinkhole_ip]
         return [
             "--name",
             name,
-            "--network",
-            INSTALL_NETWORK,
+            *network,
             "--user",
             "10001:10001",
             "--cap-drop",
@@ -271,50 +306,75 @@ class Sandbox:
         ]
 
     def probe(self, spec: dict[str, Any]) -> SandboxResult:
-        """Install and enumerate one package server inside the sandbox."""
+        """Install and enumerate one package server inside the sandbox.
+
+        Two containers, not one. The first installs with ordinary DNS and is
+        then committed to an ephemeral image; the second runs that image on the
+        sinkhole network with the sinkhole as its only resolver. ``--dns`` is
+        fixed when a container is created, so a single container cannot have
+        working DNS during install and sinkholed DNS during the probe — and
+        without the second, a server's connection attempts fail at resolution
+        and are never recorded, which looks exactly like a server that never
+        tried. Nothing crosses between the two but the committed filesystem: no
+        volume, no mount, no host path.
+        """
         if not self._sinkhole_ip:
             self.start_sinkhole()
-        name = f"mcpwatch-probe-{spec['server_key'].replace('/', '-').replace('.', '-')[:48]}"
-        docker("rm", "-f", name, check=False)
+        stem = spec["server_key"].replace("/", "-").replace(".", "-")[:40]
+        installer, prober = f"mcpwatch-install-{stem}", f"mcpwatch-probe-{stem}"
+        image = f"mcpwatch/staged:{stem.lower()}"
+        environment = ["-e", f"MCPWATCH_SPEC={json.dumps(spec)}"]
         started = time.monotonic()
 
+        for name in (installer, prober):
+            docker("rm", "-f", name, check=False)
         try:
             docker(
                 "run",
                 "-d",
-                *self.run_flags(name),
-                "-e",
-                f"MCPWATCH_SPEC={json.dumps(spec)}",
+                *self.run_flags(installer, isolated=False),
+                *environment,
                 "--entrypoint",
                 "sleep",
                 self.probe_image,
-                str(INSTALL_TIMEOUT + PROBE_TIMEOUT + 60),
+                str(INSTALL_TIMEOUT + 60),
             )
-            self.mark_sinkhole()
-
-            install = self.exec_driver(name, "install", timeout=INSTALL_TIMEOUT)
+            install = self.exec_driver(installer, "install", timeout=INSTALL_TIMEOUT)
             if install.get("status") != "ok":
                 return self._result(spec, install, started)
 
-            # Egress is cut here, before any third-party code runs.
-            self._isolate(name)
+            docker("commit", installer, image, timeout=300.0)
+            docker("rm", "-f", installer, check=False, timeout=60.0)
 
-            probe = self.exec_driver(name, "probe", timeout=PROBE_TIMEOUT)
-            probe["egress"] = self.collect_egress()
-            return self._result(spec, probe, started)
+            # From here on, publisher code runs. It has no route off the host
+            # and every name it resolves answers with the sinkhole.
+            docker(
+                "run",
+                "-d",
+                *self.run_flags(prober, isolated=True),
+                *environment,
+                "--entrypoint",
+                "sleep",
+                image,
+                str(PROBE_TIMEOUT + 60),
+            )
+            self._assert_isolated(prober)
+            self.mark_sinkhole()
+
+            result = self.exec_driver(prober, "probe", timeout=PROBE_TIMEOUT)
+            result["egress"] = self.collect_egress()
+            return self._result(spec, result, started)
         finally:
-            docker("rm", "-f", name, check=False, timeout=60.0)
+            for name in (installer, prober):
+                docker("rm", "-f", name, check=False, timeout=60.0)
+            docker("rmi", "-f", image, check=False, timeout=120.0)
 
-    def _isolate(self, name: str) -> None:
-        """Move a running container from the install network to the sinkhole.
+    def _assert_isolated(self, name: str) -> None:
+        """Refuse to run publisher code in a container with a way out.
 
-        Verified, not assumed. If the container is still attached to anything
-        with a route off the host after this, the caller must not proceed to
-        launch third-party code inside it.
+        Checked against the running container rather than trusted to the flags
+        we passed: this is the last point at which stopping is still free.
         """
-        docker("network", "disconnect", INSTALL_NETWORK, name)
-        docker("network", "connect", SINKHOLE_NETWORK, name)
-
         attached = docker(
             "inspect",
             name,

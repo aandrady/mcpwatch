@@ -32,7 +32,6 @@ from typing import Any
 from mcpwatch.store import JsonValue
 
 from .containment import (
-    INSTALL_NETWORK,
     PROBE_TIMEOUT,
     SINKHOLE_NETWORK,
     ContainmentError,
@@ -119,10 +118,14 @@ def verify(sandbox: Sandbox, *, keep: bool = False) -> VerificationReport:
     docker("rm", "-f", CANARY_CONTAINER, check=False)
     spec = {"server_key": "mcpwatch/canary", "command": ["python3", CANARY_PATH]}
     try:
+        # Exactly the flags a real probe container gets, from the same method,
+        # so the thing verified here and the thing that runs publisher code
+        # cannot drift apart. The canary needs no install, so it starts
+        # isolated rather than going through the staging container.
         docker(
             "run",
             "-d",
-            *sandbox.run_flags(CANARY_CONTAINER),
+            *sandbox.run_flags(CANARY_CONTAINER, isolated=True),
             "-e",
             f"MCPWATCH_SPEC={json.dumps(spec)}",
             "--entrypoint",
@@ -132,10 +135,6 @@ def verify(sandbox: Sandbox, *, keep: bool = False) -> VerificationReport:
         )
         docker("cp", str(canary), f"{CANARY_CONTAINER}:{CANARY_PATH}")
 
-        # Same isolation step the real probe performs, exercised here so the
-        # test covers the transition rather than a hand-built approximation.
-        docker("network", "disconnect", INSTALL_NETWORK, CANARY_CONTAINER)
-        docker("network", "connect", SINKHOLE_NETWORK, CANARY_CONTAINER)
         attached = docker(
             "inspect",
             CANARY_CONTAINER,
