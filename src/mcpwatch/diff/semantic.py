@@ -38,6 +38,13 @@ _MODELLED_MANIFEST_FIELDS = frozenset(
     {"tools", "prompts", "resources", "serverInfo", "capabilities"}
 )
 
+_MODELLED_TOOL_FIELDS = frozenset(
+    {"name", "description", "annotations", "execution", "inputSchema"}
+)
+
+_SCHEMA_BODY = frozenset({"properties", "required"})
+"""Parts of an input schema diffed parameter by parameter, not as a blob."""
+
 _RENAME_SIMILARITY = 0.6
 """How alike two descriptions must be to support a rename claim.
 
@@ -369,7 +376,9 @@ def _diff_schema(
 
     for name in sorted(set(old_props) & set(new_props)):
         old_param, new_param = _obj(old_props[name]), _obj(new_props[name])
+        explained = False
         if old_param.get("type") != new_param.get("type"):
+            explained = True
             changes.append(
                 Change(
                     kind=ChangeKind.PARAM_TYPE_CHANGED,
@@ -380,12 +389,27 @@ def _diff_schema(
                 )
             )
         if old_param.get("description") != new_param.get("description"):
+            explained = True
             changes.append(
                 _text_change(
                     ChangeKind.PARAM_DESCRIPTION_CHANGED,
                     f"{base}/{name}/description",
                     old_param.get("description"),
                     new_param.get("description"),
+                    tool=tool,
+                )
+            )
+        # Anything type and description do not account for: an `enum` gaining a
+        # value, a `pattern` loosening, a `default` moving. Without this the
+        # change is invisible and the transition looks like a hash that moved
+        # for no reason.
+        if not explained and _canon(old_props[name]) != _canon(new_props[name]):
+            changes.append(
+                Change(
+                    kind=ChangeKind.PARAM_SCHEMA_CHANGED,
+                    path=f"{base}/{name}",
+                    before=old_props[name],
+                    after=new_props[name],
                     tool=tool,
                 )
             )
@@ -449,6 +473,33 @@ def _diff_tool(
             )
         )
     changes.extend(_diff_schema(tool, before, after))
+
+    # The schema outside `properties` and `required` — `additionalProperties`,
+    # `$schema`, nested `$defs` — plus any tool-level field the protocol has
+    # that this engine does not model, such as `title` or `outputSchema`.
+    old_frame = {k: v for k, v in _obj(before.get("inputSchema")).items() if k not in _SCHEMA_BODY}
+    new_frame = {k: v for k, v in _obj(after.get("inputSchema")).items() if k not in _SCHEMA_BODY}
+    if _canon(old_frame) != _canon(new_frame):
+        changes.append(
+            Change(
+                kind=ChangeKind.TOOL_FIELD_CHANGED,
+                path=f"tools/{tool}/inputSchema",
+                before=old_frame,
+                after=new_frame,
+                tool=tool,
+            )
+        )
+    for name in sorted((set(before) | set(after)) - _MODELLED_TOOL_FIELDS):
+        if _canon(before.get(name)) != _canon(after.get(name)):
+            changes.append(
+                _text_change(
+                    ChangeKind.TOOL_FIELD_CHANGED,
+                    f"tools/{tool}/{name}",
+                    before.get(name),
+                    after.get(name),
+                    tool=tool,
+                )
+            )
     return changes
 
 

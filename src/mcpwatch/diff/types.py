@@ -106,8 +106,23 @@ class ChangeKind(StrEnum):
     PARAM_BECAME_REQUIRED = "param_became_required"
     PARAM_BECAME_OPTIONAL = "param_became_optional"
     PARAM_DESCRIPTION_CHANGED = "param_description_changed"
+    PARAM_SCHEMA_CHANGED = "param_schema_changed"
+    """A parameter's schema moved in a way type and description do not explain.
+
+    Where an `enum` gains a value, a `pattern` loosens, a `default` changes. Not
+    exotic — and without this the change is invisible, which is worse than
+    imprecise: the transition shows up as a hash that moved for no describable
+    reason.
+    """
+
     ANNOTATION_CHANGED = "annotation_changed"
     EXECUTION_CHANGED = "execution_changed"
+    TOOL_FIELD_CHANGED = "tool_field_changed"
+    """A tool-level field this engine does not model explicitly.
+
+    `title`, `outputSchema`, whatever the protocol adds next. The catch-all
+    exists because the alternative is silence.
+    """
 
     # --- other Layer-2 surfaces ------------------------------------------
     PROMPT_ADDED = "prompt_added"
