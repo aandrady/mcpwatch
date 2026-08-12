@@ -28,6 +28,8 @@ I probed the live ecosystem before decomposing. Five findings materially affect 
 
 Versions-per-server distribution: 12,159 servers have exactly 1 version, 3,400 have 2, 1,468 have 3, 800 have 4, tailing to 130 servers with 10+.
 
+> **Correction (2026-08-11, from the WP5 backfill).** The head of that distribution held up; the tail figure did not. Measured over the full backfilled corpus (21,666 servers, 71,706 versions): 12,794 have 1 version, 3,596 have 2, 1,650 have 3, 856 have 4, 1,553 have 5–9, and **1,217 have 10 or more** — nearly ten times the "130" above. The census's own totals already implied this and the tail statement contradicted them: 67,425 versions minus the ~26,563 held by servers with 1–4 versions leaves ~40,862 versions spread over ~2,626 servers, which cannot happen with only 130 servers above 10. The mean (3.30 then, 3.31 now) was never wrong. Population growth accounts for the rest: ~600 new servers/day since the day-zero census.
+
 Two consequences worth stating plainly:
 
 1. **The published censuses this plan positions against covered 1,899 and 1,808 servers.** This observatory's population is ~11x larger. Coverage alone is a defensible contribution.
@@ -120,7 +122,7 @@ Package 3's gate is the one people get wrong — see §3.
 
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
-| **5** | **Retrospective backfill** | `/versions` for 20,453 servers → ~46,970 transitions | All 8,294 multi-version servers have complete, gap-free chains |
+| **5** | **Retrospective backfill** — **[DONE 2026-08-11]** | 71,706 versions across 21,666 servers → **50,040 transitions** | Met: 8,872 multi-version servers, all chains verified against `/versions` |
 | **6** | **Diff engine & identity model** | Semantic diffs; mutated vs. replaced vs. disappeared | Correct on hand-built fixture set + real backfilled diffs |
 | **7** | **Mutation classifier & adjudication** | Rules + LLM + human adjudication UI; taxonomy from plan §B | **κ > 0.75 on 200 adjudicated diffs** |
 
@@ -158,7 +160,7 @@ Second-order risk: **false-negative on identity.** A server that changes its reg
 Week 1    ├─ [DONE] VPS provisioned & verified — ssh mcpwatch
           ├─ WP1 storage → WP2 registry collector → WP4 scheduling   [LIVE]
           └─ WP3 live prober                                         [LIVE]
-Week 2    ├─ WP5 backfill (instant historical corpus)
+Week 2    ├─ WP5 backfill (instant historical corpus)                [DONE 2026-08-11]
 Weeks 2-4 ├─ WP6 diff engine   ─┐ built and calibrated against
           └─ WP7 classifier    ─┘ real backfilled mutations
 Weeks 4-12├─ WP8 sandbox → WP9 divergence harness
