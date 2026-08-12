@@ -124,7 +124,23 @@ Package 3's gate is the one people get wrong — see §3.
 |---|---|---|---|
 | **5** | **Retrospective backfill** — **[DONE 2026-08-11]** | 71,706 versions across 21,666 servers → **50,040 transitions** | Met: 8,872 multi-version servers, all chains verified against `/versions` |
 | **6** | **Diff engine & identity model** — **[DONE 2026-08-12]** | 72,521 Layer-1 + 7,940 Layer-2 ChangeSets; **1,517 REPLACED**, 245 RENAMED | Met: fixture suite green, 20 real diffs hand-verified against raw blobs, 0 mismatches |
-| **7** | **Mutation classifier & adjudication** — **[BUILT 2026-08-12]** | Rules + pinned-model LLM + blind two-rater adjudication + per-class κ | **κ gate NOT met — needs human adjudication; the machinery is built and tested, the labels are not** |
+| **7** | **Mutation classifier & adjudication** — **[AWAITING RATERS 2026-08-12]** | Rules + pinned-model LLM + blind two-rater adjudication + per-class κ; **calibration set drawn** | **κ gate NOT met — the machinery is built and the set is fixed, the labels are not** |
+
+**WP7 is blocked on two things, neither of them code.** The calibration set was drawn
+2026-08-12: 200 manifest-layer ChangeSets, seed `20260812`, 100 flagged / 100 unflagged, from a
+pool of 2,772 (995 flagged). The frame is recorded in `calibration_frame` and every item resolves
+to a real ChangeSet. What remains:
+
+1. **Two humans have to rate all 200, blind to each other.** Cohen's κ between raters cannot be
+   computed from one rater's labels, and `--show-llm` must stay off during this — a rater who saw
+   the model's answer is not an independent second opinion.
+2. **The model layer needs an API key on the collection host.** There is none there, by design;
+   nothing else in the pipeline needs credentials. Until one exists, κ between the machine and
+   human consensus is unmeasurable.
+
+The rule layer settles 1 of the 200 on its own. That is the intended shape after the precision
+tuning of 2026-08-12 — recall is the model's job and adjudication is the ground truth — but it
+does mean the gate rests almost entirely on the human labels.
 
 ### Wave 3 — The technical novelty (weeks 4–12, runs *during* the observation window)
 
