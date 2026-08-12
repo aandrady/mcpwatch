@@ -16,10 +16,11 @@ import argparse
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, norm_sha256
+from mcpwatch.store import Corpus, JsonValue, Layer, ObservationStatus, norm_sha256, utcnow
 
 from .containment import ContainmentError, Sandbox, SandboxResult
 from .frame import DEFAULT_SAMPLE_SIZE, SampleStore, candidates, draw
@@ -41,6 +42,16 @@ sandbox does not get to use all of it.
 
 Two leaves roughly half the machine free. The cycle takes about twice as long,
 which is the correct trade for a nightly job with no deadline.
+"""
+
+
+DEFAULT_DEADLINE_SECONDS = 21600.0
+"""Hard ceiling on one cycle (6h).
+
+A measured 400-member cycle at concurrency 2 runs a little over two hours, so
+this is generous — it exists to stop a pathological tail overrunning into the
+next night's cycle, not to cut a normal run short. Two sandboxes competing for
+the same four cores is worse than either alone.
 """
 
 
@@ -129,18 +140,39 @@ def _probe(args: argparse.Namespace) -> int:
 
     stats: dict[str, int] = {}
     egress_servers: list[str] = []
+    probed = 0
+    deadline = time.monotonic() + args.deadline_seconds
+    truncated = False
+
     with Corpus(args.corpus) as corpus:
         run_id = corpus.start_run(COLLECTOR, COLLECTOR_VERSION)
         try:
+            # Submitted rather than mapped, so the deadline can cancel what has
+            # not started. Each observation is committed as it lands, so a cycle
+            # that runs out of time keeps everything it collected.
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-                for result in pool.map(sandbox.probe, specs):
+                pending = {pool.submit(sandbox.probe, spec): spec for spec in specs}
+                for future in as_completed(pending):
+                    result = future.result()
                     _record(corpus, run_id, result, stats)
+                    probed += 1
                     if result.attempted_egress:
                         egress_servers.append(result.server_key)
+                    if time.monotonic() > deadline:
+                        # A cycle must be bounded or it eventually overruns into
+                        # the next one, and two sandboxes competing for the same
+                        # four cores is worse than either alone.
+                        truncated = True
+                        for waiting in pending:
+                            waiting.cancel()
+                        break
         finally:
             summary: dict[str, JsonValue] = {
                 "members": len(specs),
+                "probed": probed,
                 "concurrency": args.concurrency,
+                "deadline_seconds": args.deadline_seconds,
+                "deadline_exceeded": truncated,
                 "status_counts": dict(stats),
                 "attempted_egress": list(egress_servers),
                 # The containment report travels with the run, so a reader can
@@ -150,7 +182,19 @@ def _probe(args: argparse.Namespace) -> int:
             }
             corpus.finish_run(run_id, stats=summary)
 
-    print(json.dumps({"members": len(specs), "status_counts": stats}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {"members": len(specs), "probed": probed, "status_counts": stats},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if truncated:
+        print(
+            f"\n{utcnow().isoformat()} cycle hit its {args.deadline_seconds:.0f}s deadline; "
+            f"{probed} of {len(specs)} members recorded",
+            file=sys.stderr,
+        )
     if egress_servers:
         # Not an error. A server that opens a connection while merely listing
         # its tools is a finding, and the sinkhole is why we can say so.
@@ -167,13 +211,21 @@ def _record(corpus: Corpus, run_id: str, result: SandboxResult, stats: dict[str,
     stats[result.status] = stats.get(result.status, 0) + 1
 
     if not result.ok:
+        failure_detail = result.detail
+        if result.credentials_undeclared:
+            # A finding, not bookkeeping: the server demands a variable its
+            # published registry record never mentions, so a consumer reading
+            # that record could not know it was needed.
+            failure_detail = (
+                f"[credential not declared in the registry record] {failure_detail or ''}".strip()
+            )
         corpus.record_failure(
             run_id=run_id,
             server_key=result.server_key,
             layer=Layer.MANIFEST,
             status=_status_for(result.status),
             error_class=result.status,
-            error_detail=result.detail,
+            error_detail=failure_detail,
         )
         return
 
@@ -217,6 +269,9 @@ def _status_for(failure: str) -> ObservationStatus:
     return {
         "install_failed": ObservationStatus.UNREACHABLE,
         "launch_failed": ObservationStatus.UNREACHABLE,
+        # Installed, but cannot import what it needs. The enum stays coarse and
+        # `error_class` carries the precision, as it does for the HTTP prober.
+        "dependency_broken": ObservationStatus.UNREACHABLE,
         "timeout": ObservationStatus.TIMEOUT,
         "requires_credentials": ObservationStatus.AUTH_REQUIRED,
         "protocol_error": ObservationStatus.PROTOCOL_ERROR,
@@ -247,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("probe", help="probe every sample member (verifies containment first)")
     run.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     run.add_argument("--limit", type=int, default=None, help="probe only the first N members")
+    run.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_DEADLINE_SECONDS,
+        help="stop starting new probes after this long, and close the run honestly",
+    )
     run.set_defaults(func=_probe)
 
     args = parser.parse_args(argv)

@@ -130,6 +130,7 @@ class SandboxResult:
     probes: tuple[dict[str, Any], ...] = ()
     command: tuple[str, ...] = ()
     used_placeholders: bool = False
+    credentials_undeclared: bool = False
     detail: str | None = None
     stderr_tail: str | None = None
     egress: tuple[dict[str, Any], ...] = ()
@@ -516,6 +517,7 @@ class Sandbox:
             probes=tuple(p for p in probes if isinstance(p, dict)),
             command=tuple(payload.get("command") or ()),
             used_placeholders=bool(payload.get("used_placeholders")),
+            credentials_undeclared=bool(payload.get("credentials_undeclared")),
             detail=payload.get("detail") or payload.get("bare_launch_error"),
             stderr_tail=payload.get("stderr_tail"),
             egress=tuple(payload.get("egress") or ()),

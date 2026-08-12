@@ -1,0 +1,31 @@
+[Unit]
+Description=MCPWatch WP8 package-server sandbox enumeration
+Documentation=https://github.com/aandrady/mcpwatch
+After=network-online.target
+# Ordering only. The sample is fixed and stored, so this does not need a fresh
+# registry crawl to know what to probe — but running after the day's other
+# collectors keeps the four cores to itself.
+After=mcpwatch-manifest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.sandbox probe
+
+# The cycle enforces its own 6h deadline and closes the run honestly on expiry.
+# This must fire later than that, so a cycle is never SIGTERMed mid-write.
+TimeoutStartSec=25200
+
+# This unit executes untrusted third-party code, so the caps matter more here
+# than anywhere else in the project. They bound the *supervisor*; each probe
+# container carries its own --cpus, --memory and --pids-limit, and the cycle
+# runs two at a time by default.
+CPUQuota=250%
+MemoryMax=3G
+Nice=15
+
+# No [Install] section on purpose. This service is activated by its timer;
+# WantedBy=default.target would mean an `enable` also runs the sandbox on every
+# boot, outside the schedule.

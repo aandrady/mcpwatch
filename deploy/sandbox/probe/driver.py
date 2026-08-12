@@ -423,23 +423,57 @@ from the first, so this file travels with the filesystem.
 """
 
 
-CREDENTIAL_HINTS = ("api key", "api_key", "token", "credential", "unauthor", "must be set")
-"""Phrases a server uses when what it is missing is a secret.
+CREDENTIAL_HINTS = (
+    "api key",
+    "api_key",
+    "token",
+    "credential",
+    "unauthor",
+    "must be set",
+    "is required",
+    "environment variable",
+)
+"""Phrases a server uses when what it is missing is a secret."""
 
-Checked against the server's own stderr after a placeholder launch has already
-failed. Coarse on purpose: this separates `requires_credentials` from `crashed`
-in the reported taxonomy, and over-calling it would understate real breakage,
-so it fires only when a placeholder was already tried and rejected.
+DEPENDENCY_HINTS = (
+    "modulenotfounderror",
+    "importerror",
+    "cannot find module",
+    "err_module_not_found",
+)
+"""Phrases a runtime uses when the install produced something that cannot import.
+
+Its own class because it is a distinct and reportable phenomenon rather than
+generic breakage. Measured over the first full cycle: 26 of 400 sampled servers
+failed on exactly `No module named 'mcp.server.fastmcp'` — packages that declare
+an unpinned dependency on the MCP SDK, which has since released 2.0 and moved
+that module. A published, version-pinned server that no longer runs because its
+own dependency floated is precisely what a longitudinal observatory should be
+able to name, and calling it `crashed` would bury it.
 """
 
 
-def _credentials_wanted(spec: dict, detail: str) -> bool:
-    """Whether a failure is best explained by a credential we will never supply."""
-    declared = spec.get("environment_variables") or []
-    if not any(item.get("isSecret") or item.get("isRequired") for item in declared):
-        return False
+def classify_failure(spec: dict, klass: str, detail: str) -> tuple[str, bool]:
+    """Refine a crash into a more specific class using the server's own words.
+
+    Returns the class and whether a credential was wanted but never declared in
+    the registry record. That second value is a finding on its own: 36 of the
+    first cycle's crashes were servers demanding a variable their published
+    metadata never mentions, so a consumer reading the registry could not know
+    it was needed.
+    """
+    if klass != "crashed":
+        return klass, False
     lowered = detail.casefold()
-    return any(hint in lowered for hint in CREDENTIAL_HINTS)
+    if any(hint in lowered for hint in DEPENDENCY_HINTS):
+        return "dependency_broken", False
+    if any(hint in lowered for hint in CREDENTIAL_HINTS):
+        declared = any(
+            item.get("isSecret") or item.get("isRequired")
+            for item in spec.get("environment_variables") or []
+        )
+        return "requires_credentials", not declared
+    return klass, False
 
 
 def _install_phase(spec: dict) -> int:
@@ -507,11 +541,12 @@ def main() -> int:
         result["used_placeholders"] = used_placeholders
         result["stderr_tail"] = stderr
     except Failed as exc:
-        # A server that refuses to start without a real secret is a documented
-        # population, not breakage. It is only called that after an obviously
-        # fake placeholder was already offered and rejected.
-        wanted = used_placeholders and _credentials_wanted(spec, exc.detail)
-        result["status"] = "requires_credentials" if wanted else exc.klass
+        # A server that refuses to start without a real secret, or one whose own
+        # dependencies no longer import, is a documented population rather than
+        # unexplained breakage. Both are read off the server's own stderr.
+        klass, undeclared = classify_failure(spec, exc.klass, exc.detail)
+        result["status"] = klass
+        result["credentials_undeclared"] = undeclared
         result["detail"] = exc.detail[-STDERR_TAIL:]
     except OSError as exc:
         result["status"] = "install_failed"
