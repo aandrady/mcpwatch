@@ -110,6 +110,27 @@ def _copy_index(source_db: Path, target: Path) -> int:
     return target.stat().st_size
 
 
+def _copy_sidecars(corpus_root: Path, backup_root: Path, moment: str) -> int:
+    """Snapshot every other SQLite database sitting beside the corpus.
+
+    ``classify.db`` is the one that matters: WP7's human adjudications are the
+    most expensive rows in the project — hours of expert attention that, unlike
+    a machine label, cannot be regenerated at any price. They were outside the
+    backup until this existed, which made the backup's promise narrower than it
+    looked.
+
+    Discovered by glob rather than named, so a later package that puts its own
+    database here is covered without anyone having to remember to add it.
+    """
+    total = 0
+    for source in sorted(corpus_root.glob("*.db")):
+        if source.name == INDEX_FILENAME:
+            continue
+        target = backup_root / f"{source.stem}-{moment}.db"
+        total += _copy_index(source, target)
+    return total
+
+
 def _mirror_blobs(source: BlobStore, mirror: BlobStore, *, link: bool) -> tuple[int, int]:
     """Copy blobs missing from the mirror. Returns (count, bytes).
 
@@ -214,6 +235,7 @@ def backup_corpus(
     copied, copied_bytes = _mirror_blobs(source_blobs, mirror_blobs, link=link)
 
     index_bytes = _copy_index(corpus_root / INDEX_FILENAME, snapshot)
+    sidecar_bytes = _copy_sidecars(corpus_root, backup_root, moment)
 
     existing = list_snapshots(backup_root)
     pruned = 0
@@ -227,7 +249,7 @@ def backup_corpus(
 
     result = BackupResult(
         snapshot=snapshot.name,
-        index_bytes=index_bytes,
+        index_bytes=index_bytes + sidecar_bytes,
         blobs_copied=copied,
         blob_bytes_copied=copied_bytes,
         blobs_total=mirror_blobs.count(),
