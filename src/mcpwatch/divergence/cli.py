@@ -41,6 +41,7 @@ EXPECTED: dict[str, set[Capability]] = {
         Capability.NETWORK,
         Capability.SUBPROCESS,
         Capability.CREDENTIAL_ACCESS,
+        Capability.FILESYSTEM_WRITE,
     },
     # Declares nothing, does nothing.
     "inert": set(),
@@ -150,14 +151,8 @@ def _validate(args: argparse.Namespace) -> int:
         tools = _fixture_tools(fixture)
         findings = _analyse(payload, tools, f"mcpwatch/fixture-{fixture}")
         found = {f.capability for f in findings}
-        # Filesystem is excluded from the assertion: a Python process writes
-        # __pycache__ and reads its own imports on any code path, so it has a
-        # benign background rate that would make this gate flap. Network,
-        # subprocess and credential access have no such background.
-        found = {c for c in found if c not in (Capability.FILESYSTEM_READ,)}
-        expected_here = {c for c in expected if c not in (Capability.FILESYSTEM_READ,)}
-        missing = expected_here - found
-        spurious = found - expected_here
+        missing = expected - found
+        spurious = found - expected
         ok = not missing and not spurious
         failures += 0 if ok else 1
         print(f"[{'PASS' if ok else 'FAIL'}] {fixture}: status={payload.get('status')}")
