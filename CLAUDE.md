@@ -15,13 +15,28 @@ Write and edit code here with the normal file tools — they operate on the loca
 editing over SSH through Bash heredocs is slow and error-prone. Then deploy and run on the VPS.
 
 ```
-ssh mcpwatch        # alias in the local ~/.ssh/config; key auth, non-interactive
-git push vps main   # deploy: post-receive hook checks out into ~/code/mcpwatch
+ssh mcpwatch          # alias in the local ~/.ssh/config; key auth, non-interactive
+git push vps main     # deploy: post-receive hook checks out into ~/code/mcpwatch
+git push github main  # publish: https://github.com/aandrady/mcpwatch (public)
 ```
 
 Deploy is git-based. `vps` remote → bare repo `~/code/mcpwatch.git`; its `post-receive` hook
 runs `checkout -f main` into the work tree `~/code/mcpwatch/`. Commit locally, push, done.
 `checkout -f` never removes untracked files, so anything not in git is safe.
+
+**Two remotes, both named explicitly.** Deploying and publishing are separate acts and neither
+is the default, so `main` deliberately has no upstream — a bare `git push` does nothing rather
+than guessing. `vps` is the one that matters operationally; `github` is the public mirror.
+
+**The GitHub repo is owned by `aandrady`, and `gh` here holds two accounts.** Pushes over HTTPS
+authenticate as whichever account is *active*, so `gh auth status` before pushing if anything
+looks odd, and `gh auth switch` to correct it. On the VPS, `gh` is `aandrady` only and its key
+is registered, so `ssh mcpwatch 'git --git-dir=$HOME/code/mcpwatch.git push github main'` works
+from there too.
+
+**Nothing about the production host goes in this repo.** It is public, and its history was
+rewritten once already to remove an IP, an account name, and co-tenant workload names. Refer to
+the collection host as `ssh mcpwatch` and leave the specifics in the local `~/.ssh/config`.
 
 **Paths on the VPS:**
 
