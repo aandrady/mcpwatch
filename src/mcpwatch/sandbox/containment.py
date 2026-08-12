@@ -68,6 +68,7 @@ SINKHOLE_IMAGE = "mcpwatch/sinkhole:0.1.0"
 SINKHOLE_NETWORK = "mcpwatch-sinkhole"
 INSTALL_NETWORK = "mcpwatch-install"
 SINKHOLE_CONTAINER = "mcpwatch-sinkhole"
+STAGED_PREFIX = "mcpwatch/staged"
 
 MEMORY_LIMIT = "1g"
 CPU_LIMIT = "1.0"
@@ -243,10 +244,25 @@ class Sandbox:
         return address
 
     def setup(self) -> None:
-        """Build images, create networks, start the sinkhole."""
+        """Build images, create networks, start the sinkhole, clear staged images."""
         self.build()
         self.ensure_networks()
         self.start_sinkhole()
+        self.prune_staged()
+
+    def prune_staged(self) -> None:
+        """Remove staged images left behind by an interrupted cycle.
+
+        `probe` removes its own staged image in a `finally`, but a cycle killed
+        between the commit and that removal leaks one. Each is a full copy of an
+        installed package tree, so on a box with 49 GB free this is worth
+        clearing at the start of every cycle rather than after an incident.
+        """
+        listed = docker(
+            "images", f"{STAGED_PREFIX}*", "--format", "{{.Repository}}:{{.Tag}}", check=False
+        ).stdout.split()
+        for image in listed:
+            docker("rmi", "-f", image, check=False, timeout=120.0)
 
     @property
     def sinkhole_ip(self) -> str:
@@ -322,7 +338,7 @@ class Sandbox:
             self.start_sinkhole()
         stem = spec["server_key"].replace("/", "-").replace(".", "-")[:40]
         installer, prober = f"mcpwatch-install-{stem}", f"mcpwatch-probe-{stem}"
-        image = f"mcpwatch/staged:{stem.lower()}"
+        image = f"{STAGED_PREFIX}:{stem.lower()}"
         environment = ["-e", f"MCPWATCH_SPEC={json.dumps(spec)}"]
         started = time.monotonic()
 
