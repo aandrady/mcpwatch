@@ -123,7 +123,7 @@ Package 3's gate is the one people get wrong — see §3.
 | # | Package | Deliverable | Gate |
 |---|---|---|---|
 | **5** | **Retrospective backfill** — **[DONE 2026-08-11]** | 71,706 versions across 21,666 servers → **50,040 transitions** | Met: 8,872 multi-version servers, all chains verified against `/versions` |
-| **6** | **Diff engine & identity model** | Semantic diffs; mutated vs. replaced vs. disappeared | Correct on hand-built fixture set + real backfilled diffs |
+| **6** | **Diff engine & identity model** — **[DONE 2026-08-12]** | 72,521 Layer-1 + 7,940 Layer-2 ChangeSets; **1,517 REPLACED**, 245 RENAMED | Met: fixture suite green, 20 real diffs hand-verified against raw blobs, 0 mismatches |
 | **7** | **Mutation classifier & adjudication** | Rules + LLM + human adjudication UI; taxonomy from plan §B | **κ > 0.75 on 200 adjudicated diffs** |
 
 ### Wave 3 — The technical novelty (weeks 4–12, runs *during* the observation window)

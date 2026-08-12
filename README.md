@@ -246,6 +246,41 @@ package-identity swap lists that are WP7's highest-priority subset. It reports w
 refuses to say whether that was benign — classification is WP7's job, and doing it here with
 ad-hoc heuristics would quietly become the number everyone cites.
 
+## `mcpwatch.diff` — semantic diffs and the identity model (WP6)
+
+```bash
+uv run python -m mcpwatch.diff --layer registry --out changes.jsonl --stats
+uv run python -m mcpwatch.diff --layer manifest --flagged-only    # the WP7 queue
+```
+
+Turns consecutive observations into typed ChangeSets. **Semantic, not textual**: "a required
+parameter named `webhook_url` appeared on the tool `summarize`" is classifiable; "40 lines
+differ" is not. The engine reads and never writes — ChangeSets are a reading of the corpus, not
+part of it, so a better differ next year gets better answers from the same evidence.
+
+**Identity resolution is what protects the numbers.** Measured over the backfilled corpus:
+
+| Verdict | Layer 1 | What it means |
+|---|---:|---|
+| MUTATED | 48,766 | Same identity, changed content |
+| **REPLACED** | **1,517** | Same registry name, moved repository or endpoint |
+| **RENAMED** | **245** | New name, same repo — the mutation across it would otherwise vanish |
+| DISAPPEARED / RETURNED | 498 / 28 | Withdrawn; withdrawn then republished |
+
+Walking by name alone would report all 245 renames as a disappearance plus an unrelated
+creation, losing the mutation between them, and all 1,517 replacements as ordinary edits.
+
+**Severity flags order a review queue and nothing more.** Each is a reason to look, deliberately
+over-inclusive — the cost of a false positive is one human glance, the cost of a false negative
+is a rug pull nobody reads. On Layer 2 they select **262 of 7,032** ChangeSets (3.7%), which is
+a tractable adjudication budget. Whether any of them is malicious is WP7's call, not this
+package's.
+
+One implementation note worth keeping: the parameter matcher tokenizes identifiers before
+matching, because `\b` does not fire inside `snake_case` or `camelCase`. The first version
+silently missed `webhook_url`, `callbackUrl` and `targetHost` — the exact names an exfiltration
+parameter arrives under.
+
 ## Operations
 
 ```bash
