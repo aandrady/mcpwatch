@@ -73,11 +73,12 @@ class Metrics:
     """Days the layer's records actually span.
 
     Different from :attr:`observation_days` and the difference is the whole
-    two-layer design. Layer 1 was collected for days but covers years, because
-    the registry publishes its own version history and WP5 backfilled it. Layer 2
-    covers exactly as long as it has been collected, because nothing can
-    reconstruct a tool manifest from before the first probe. Reporting only the
-    collection window would understate Layer 1 by three orders of magnitude.
+    two-layer design. Layer 1 was collected for days but spans the registry's
+    entire published history, because the registry exposes it and WP5 backfilled
+    all of it. Layer 2 spans exactly as long as it has been collected, because
+    nothing can reconstruct a tool manifest from before the first probe.
+    Reporting only the collection window would understate Layer 1 by two orders
+    of magnitude.
     """
     servers: int = 0
     transitions: int = 0
