@@ -12,6 +12,7 @@ attacker-influenced bytes and must never raise — a crash there would take down
 the sinkhole that exists to record the attempt.
 """
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -21,6 +22,29 @@ import pytest
 from mcpwatch.sandbox import Candidate, SampleStore, allocate, candidates, draw
 from mcpwatch.sandbox.frame import MINIMUM_PER_STRATUM
 from mcpwatch.store import Corpus, Layer, ObservationStatus
+
+CONTAINER_PYTHON = (3, 11)
+"""The oldest interpreter anything under ``deploy/`` has to run on.
+
+``driver.py`` runs inside the probe image (node:22-bookworm-slim, Python 3.11);
+``sinkhole.py`` runs in python:3.13-alpine. The package itself targets 3.14,
+which is a real trap: the formatter applied PEP 758 and rewrote
+``except (A, B):`` into ``except A, B:``, valid on 3.14 and a SyntaxError on
+3.11. It shipped, and the containment gate caught it only when the canary would
+not start.
+"""
+
+
+class TestContainerSideSyntax:
+    """Everything under deploy/ must parse on the interpreter it will run on."""
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted((Path(__file__).resolve().parents[1] / "deploy").rglob("*.py")),
+        ids=lambda p: p.name,
+    )
+    def test_it_parses_on_the_container_interpreter(self, path):
+        ast.parse(path.read_text(encoding="utf-8"), feature_version=CONTAINER_PYTHON)
 
 
 def _load_sinkhole():

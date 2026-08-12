@@ -97,7 +97,7 @@ def parse_sni(data: bytes) -> str | None:
             name_len = struct.unpack(">H", data[pos + 3 : pos + 5])[0]
             host = data[pos + 5 : pos + 5 + name_len]
             return host.decode("ascii", errors="replace") or None
-    except IndexError, struct.error, UnicodeDecodeError:
+    except (IndexError, struct.error, UnicodeDecodeError):
         return None
     return None
 
@@ -112,7 +112,7 @@ async def handle_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
     prefix = b""
     try:
         prefix = await asyncio.wait_for(reader.read(PREFIX_BYTES), timeout=READ_TIMEOUT)
-    except TimeoutError, ConnectionError, OSError:
+    except (TimeoutError, ConnectionError, OSError):
         pass
 
     _log(
@@ -130,7 +130,7 @@ async def handle_tcp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
     writer.close()
     try:
         await writer.wait_closed()
-    except ConnectionError, OSError:
+    except (ConnectionError, OSError):
         pass
 
 
@@ -167,7 +167,7 @@ def _dns_question(data: bytes) -> str | None:
             labels.append(data[pos : pos + length].decode("ascii", errors="replace"))
             pos += length
         return ".".join(labels) or None
-    except IndexError, UnicodeDecodeError:
+    except (IndexError, UnicodeDecodeError):
         return None
 
 
