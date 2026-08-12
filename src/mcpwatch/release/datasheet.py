@@ -144,8 +144,9 @@ def render_datasheet(
     lines += [
         "",
         "The two columns differ for a reason that is the whole two-layer design.",
-        "Layer 1 has been collected for days and covers years, because the registry",
-        "publishes its own version history and WP5 backfilled it. Layer 2's two",
+        "Layer 1 has been collected for days and covers the registry's entire",
+        "published history, because the registry exposes its own version history",
+        "and WP5 backfilled all of it. Layer 2's two",
         "figures are equal and always will be: nothing can reconstruct a tool",
         "manifest from before the first probe, so a day not collected is gone",
         "permanently. That is why the collector shipped crude and running rather",

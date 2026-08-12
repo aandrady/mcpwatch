@@ -176,9 +176,9 @@ class PolicyOutcome:
     caught_by_namespace: dict[str, int] = field(default_factory=dict)
     """Per publisher, because this population is not one server per publisher.
 
-    One namespace owns 684 servers in the corpus, and a single fleet-wide edit
-    there produces 684 transitions that a naive count reads as 684 independent
-    catches. See :meth:`concentration`.
+    One namespace owns hundreds of servers in the corpus, and a single fleet-wide
+    edit there produces hundreds of transitions that a naive count reads as
+    hundreds of independent catches. See :meth:`concentration`.
     """
 
     @property
