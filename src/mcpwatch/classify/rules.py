@@ -90,12 +90,18 @@ _INJECTION_PHRASES = (
     "before using any other tool",
     "before any other tool",
     "always call this tool first",
-    "call this tool before",
-    "new instructions",
-    "system prompt",
-    "override your",
-    "override the",
+    "ignore the system prompt",
+    "ignore your instructions",
+    "override your instructions",
 )
+
+# Removed after the first run over the corpus, each having claimed a label on
+# ordinary documentation: "override the" (matched "override the default" in a
+# CSV-parsing note), "system prompt" and "new instructions" (a server whose job
+# involves prompts says both innocently), and "call this tool before" (ordinary
+# call-ordering guidance). A phrase earns its place here only if there is no
+# honest sentence it fits, and the bar is that specific because a hit here
+# assigns a label rather than ordering a queue.
 
 # Claims of standing rather than of function. "official" and "verified" alone
 # are too common in legitimate copy ("the official Stripe API"), so each phrase
