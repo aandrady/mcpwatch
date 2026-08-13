@@ -13,6 +13,41 @@ retrospective Layer-1 corpus backfilled from the registry's own version history 
 Crawling is read-only and rate-limited, with a contact address in every User-Agent; the MCP
 client implements no code path that can call a tool. See *Ethics guardrails* in `BUILD-PLAN.md`.
 
+## Key findings
+
+All preliminary. Layer-1 figures cover the registry's whole published history (337 days);
+Layer-2 collection began 2026-08-07 and covers days, so no Layer-2 rate here should be
+annualised. "Security-relevant" throughout means a WP6 severity flag — a *reason to look*, not an
+adjudicated finding, since WP7's κ gate is not yet met. Regenerate any of it from the corpus with
+`python -m mcpwatch.release build`.
+
+- **The population is ~11x larger than any published census.** 21,712 servers tracked, against
+  the 1,899 and 1,808 of the censuses this work positions against — and 49,194 registry
+  transitions that actually changed something, already backfilled from the registry's own
+  version history.
+- **Pinning costs roughly two blocked benign updates per flagged change caught** — 1.8 at the
+  tool-manifest layer, 2.4 counting only capability and authority flags. But **70% of those
+  catches came from one publisher** rolling a single parameter across 684 of its own servers;
+  without them the ratio is 1.4. Relaxing the policy barely helps: exempting new tools, new
+  parameters *and* description edits still blocks 93% of transitions.
+- **31.2% of exercised tools did something their description never mentioned** (25 of 80, 95% CI
+  22.2–42.1%). The recurring shape is a tool whose description reads as pure local computation —
+  "calculates *X* for a given input" — and which reaches a remote API to produce the answer.
+  Individual tools and servers are not named here: a description that diverges from behaviour is
+  ambiguous by default, and the likeliest explanation is a careless description.
+- **12% of sampled package servers opened network connections while merely listing their tools**
+  (48 of 400). Nothing about enumeration requires egress.
+- **6.5% are already broken by their own dependencies** (26 of 400, one identical cause):
+  published, version-pinned servers that no longer run because they declare an *unpinned*
+  dependency on the MCP SDK, which has since released 2.0 and moved the module they import.
+- **No malicious mutation has been adjudicated.** That is the expected outcome and a publishable
+  one — see [`FRAMING.md`](FRAMING.md), written before the analysis code that produces these
+  numbers so a result could not bend the framing.
+
+Stated as a denominator, because a base rate without one gets quoted wrong: **48.5%** of Layer-2
+targets yield a usable manifest. 3,177 servers require credentials MCPWatch never supplies, 436
+are quarantined as nondeterministic, and package servers are sampled rather than enumerated.
+
 ## `mcpwatch.store` — the storage foundation (WP1)
 
 Everything else in MCPWatch appends to this. It is stdlib-only (`sqlite3`, `hashlib`, `gzip`,
