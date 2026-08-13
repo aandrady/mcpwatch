@@ -37,11 +37,14 @@ from .types import (
 
 __all__ = ["SCHEMA_VERSION", "ObservationIndex"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Bump whenever the DDL below changes in a way that needs a migration.
 
 v2 added ``observation.published_at`` and the derived ``observation.effective_at``
 for WP5's retrospective backfill.
+
+v3 added ``observation.probe_a_raw_sha`` and ``observation.probe_a_norm_sha``,
+which keep the *other* reading when a double probe disagreed.
 """
 
 _LAYERS = ", ".join(f"'{member.value}'" for member in Layer)
@@ -107,6 +110,18 @@ CREATE TABLE IF NOT EXISTS observation (
     -- point: a version published in 2024 and read today is not an observation
     -- made in 2024, and pretending otherwise would falsify the time series.
     published_at TEXT,
+
+    -- The counterpart reading, kept only when a double probe disagreed
+    -- (status = 'nondeterministic'). Both probes saw the same server seconds or
+    -- minutes apart, so whatever differs between these blobs and raw_sha/norm_sha
+    -- is by definition volatile per read rather than a mutation. Without them a
+    -- disagreement is an unattributable bit: we know the hashes differed and can
+    -- never learn what differed, and Layer 2 cannot be re-collected to find out.
+    -- Raw as well as normalized, because the corpus's rule is that no normalized
+    -- form is stored without the bytes it came from, so a future norm_version can
+    -- be replayed over these too.
+    probe_a_raw_sha  TEXT,
+    probe_a_norm_sha TEXT,
 
     -- The corpus's chronology key, derived rather than stored so no writer can
     -- forget it and no two callers can disagree about the rule. Every ordering
@@ -266,6 +281,9 @@ class ObservationIndex:
                 "ALTER TABLE observation ADD COLUMN effective_at TEXT"
                 " GENERATED ALWAYS AS (coalesce(published_at, observed_at)) VIRTUAL"
             )
+        for column in ("probe_a_raw_sha", "probe_a_norm_sha"):
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE observation ADD COLUMN {column} TEXT")
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -480,6 +498,8 @@ class ObservationIndex:
         error_class: str | None = None,
         error_detail: str | None = None,
         published_at: str | None = None,
+        probe_a_raw_sha: str | None = None,
+        probe_a_norm_sha: str | None = None,
     ) -> int:
         """Append one observation and return its ``obs_id``.
 
@@ -490,15 +510,18 @@ class ObservationIndex:
         recorded, and must be rendered by :func:`~mcpwatch.store.types.to_iso`
         like every other corpus timestamp — ``effective_at`` orders rows as text,
         so a stray ``Z`` suffix would sort into the wrong place.
+
+        ``probe_a_*`` carry the counterpart reading of a disagreeing double
+        probe, and belong only on a ``NONDETERMINISTIC`` row.
         """
         cursor = self._conn.execute(
             """
             INSERT INTO observation(
                 run_id, server_key, layer, observed_at, status,
                 raw_sha, norm_sha, norm_version, error_class, error_detail,
-                published_at
+                published_at, probe_a_raw_sha, probe_a_norm_sha
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -512,6 +535,8 @@ class ObservationIndex:
                 error_class,
                 error_detail,
                 published_at,
+                probe_a_raw_sha,
+                probe_a_norm_sha,
             ),
         )
         rowid = cursor.lastrowid
@@ -686,5 +711,11 @@ class ObservationIndex:
             "SELECT DISTINCT raw_sha AS sha FROM observation WHERE raw_sha IS NOT NULL"
             " UNION"
             " SELECT DISTINCT norm_sha AS sha FROM observation WHERE norm_sha IS NOT NULL"
+            " UNION"
+            " SELECT DISTINCT probe_a_raw_sha AS sha FROM observation"
+            " WHERE probe_a_raw_sha IS NOT NULL"
+            " UNION"
+            " SELECT DISTINCT probe_a_norm_sha AS sha FROM observation"
+            " WHERE probe_a_norm_sha IS NOT NULL"
         ).fetchall()
         return [row["sha"] for row in rows]

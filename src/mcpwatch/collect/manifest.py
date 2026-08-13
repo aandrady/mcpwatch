@@ -21,9 +21,16 @@ had done — three hours of probing for zero observations, observed in
 production. Chunking bounds that loss to the chunk in flight, at the cost of
 shorter spacing between a server's two probes.
 
-Memory matters at 10k servers: the first pass keeps only each server's
-normalized hash and discards the document. Only the second pass's manifest is
-retained and stored.
+**Both probes' documents are kept for the length of a chunk, and the first
+probe's is stored when the two disagree.** The original design discarded pass
+A's document to bound memory at 10k servers, which chunking already does — the
+ceiling is one chunk, not the population. Discarding it cost more than it saved:
+a disagreement recorded only as two differing hashes can never be explained, and
+Layer 2 cannot be re-collected to explain it later. With both manifests stored,
+whatever differs between them is by construction volatile *per read* rather than
+a mutation over time, which is the distinction the quarantine exists to draw and
+could not previously support. The cost is bounded by how many servers disagree —
+measured at ~540/day against ~10,900 probed, about 1.6 MiB.
 
 Safety properties, by construction rather than by discipline:
 
@@ -153,6 +160,7 @@ class ManifestStats:
     ok: int = 0
     nondeterministic: int = 0
     determinism_unverified: int = 0
+    probe_a_stored: int = 0
     changed: int = 0
     unchanged: int = 0
     tools_total: int = 0
@@ -510,7 +518,10 @@ class ManifestProber:
                 chunk = targets[start : start + self.chunk_size]
 
                 mark = time.monotonic()
-                first = await self._run_pass(chunk, keep_documents=False)
+                # Pass A keeps its documents too: they are what turns a
+                # disagreement into a diff. Memory is bounded by chunk_size,
+                # not by the population, and the chunk is released each loop.
+                first = await self._run_pass(chunk, keep_documents=True)
                 stats.pass_a_seconds = round(stats.pass_a_seconds + time.monotonic() - mark, 3)
 
                 # Commit each observation the moment its second probe lands.
@@ -587,6 +598,7 @@ class ManifestProber:
             msg = "second probe reported ok without a document"
             raise CollectorError(msg)
 
+        probe_a_document: dict[str, JsonValue] | None = None
         if not first.ok:
             # One good manifest, but nothing to compare it against. Store it and
             # say so, rather than silently implying the determinism check passed.
@@ -598,6 +610,12 @@ class ManifestProber:
             status = ObservationStatus.NONDETERMINISTIC
             error_class = "hash_disagreement"
             error_detail = f"probe A {first.norm_sha} != probe B {second.norm_sha}"
+            # The whole reason pass A retains documents. Both readings are of the
+            # same server minutes apart, so their difference is per-read
+            # volatility — recoverable now, unrecoverable if not stored now.
+            probe_a_document = first.document
+            if probe_a_document is not None:
+                stats.probe_a_stored += 1
             stats.nondeterministic += 1
         else:
             status = ObservationStatus.OK
@@ -613,6 +631,7 @@ class ManifestProber:
             status=status,
             error_class=error_class,
             error_detail=error_detail,
+            probe_a_document=probe_a_document,
         )
         self._count(stats.status_counts, str(status))
         stats.blobs_written += int(write.raw.created) + int(write.normalized.created)

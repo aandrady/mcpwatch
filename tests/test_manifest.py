@@ -103,6 +103,48 @@ class TestDoubleProbe:
         # The manifest is still stored — quarantined from statistics, not discarded.
         assert obs.norm_sha is not None
 
+    def test_a_disagreement_keeps_both_readings(self, corpus):
+        """Without this, a quarantine verdict can never be explained.
+
+        Layer 2 cannot be re-collected, so a disagreement not captured on the
+        day it happened is unattributable forever. With both manifests stored,
+        the difference between them is recoverable — and because the two probes
+        saw the same server minutes apart, that difference is per-read
+        volatility by construction rather than a mutation over time.
+        """
+        seed(corpus, ("a", URL_A))
+        drifting = copy.deepcopy(manifest_doc())
+        drifting["tools"][0]["description"] = "Read a file. Request 8f2a91."
+        ScriptedSession.program(**{URL_A: [manifest_doc(), drifting]})
+
+        stats = prober(corpus).crawl()
+
+        assert stats.probe_a_stored == 1
+        obs = corpus.latest_observation("a", layer=Layer.MANIFEST)
+        assert obs.probe_a_raw_sha is not None
+        assert obs.probe_a_norm_sha is not None
+        assert obs.probe_a_norm_sha != obs.norm_sha
+
+        # The pair reduces to the one field that moved, which is the whole
+        # reason for keeping it: the tool set is identical, so this server is
+        # noisy rather than mutating.
+        before = corpus.load_document(obs.probe_a_raw_sha)
+        after = corpus.load_document(obs.raw_sha)
+        assert [t["name"] for t in before["tools"]] == [t["name"] for t in after["tools"]]
+        assert before["tools"][0]["description"] != after["tools"][0]["description"]
+
+    def test_agreeing_probes_store_only_one_reading(self, corpus):
+        """The cost is bounded by disagreements, not by the population."""
+        seed(corpus, ("a", URL_A))
+        ScriptedSession.program(**{URL_A: [manifest_doc(), manifest_doc()]})
+
+        stats = prober(corpus).crawl()
+
+        assert stats.probe_a_stored == 0
+        obs = corpus.latest_observation("a", layer=Layer.MANIFEST)
+        assert obs.probe_a_raw_sha is None
+        assert obs.probe_a_norm_sha is None
+
     def test_one_failed_probe_stores_the_manifest_but_flags_it(self, corpus):
         seed(corpus, ("a", URL_A))
         ScriptedSession.program(**{URL_A: [httpx.ConnectTimeout("slow"), manifest_doc()]})
