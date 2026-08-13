@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from mcpwatch.store import Layer, ObservationIndex, ObservationStatus, StoreError
+from mcpwatch.store import (
+    SCHEMA_VERSION,
+    Layer,
+    ObservationIndex,
+    ObservationStatus,
+    StoreError,
+)
 
 SHA = "a" * 64
 
@@ -121,7 +127,7 @@ class TestMigration:
     def test_a_v1_corpus_gains_the_new_columns_without_losing_a_row(self, v1_database):
         index = ObservationIndex(v1_database)
         try:
-            assert index.schema_version == 2
+            assert index.schema_version == SCHEMA_VERSION
             assert index.count_observations() == 1
             observation = index.observations("example.com/mcp")[0]
             assert observation.raw_sha == "aaaa"
@@ -129,6 +135,10 @@ class TestMigration:
             # Nothing about the ordering of pre-existing data changes: with no
             # publication date, the chronology key is the observation time.
             assert observation.effective_at == observation.observed_at
+            # v3's columns arrive empty on history that predates them, which is
+            # the honest value: nobody kept the other probe back then.
+            assert observation.probe_a_raw_sha is None
+            assert observation.probe_a_norm_sha is None
         finally:
             index.close()
 
@@ -137,10 +147,35 @@ class TestMigration:
         first.close()
         second = ObservationIndex(v1_database)
         try:
-            assert second.schema_version == 2
+            assert second.schema_version == SCHEMA_VERSION
             assert second.count_observations() == 1
         finally:
             second.close()
+
+    def test_a_v2_corpus_migrates_to_v3(self, tmp_path: Path):
+        """The production corpus is v2, so this is the path it will take."""
+        path = tmp_path / "index.db"
+        first = ObservationIndex(path)
+        first.close()
+        # Strip v3's columns back off to synthesise a v2 database. SQLite can
+        # DROP a plain column, which is exactly what makes this reversible.
+        conn = sqlite3.connect(path)
+        conn.execute("DROP TRIGGER observation_no_update")
+        for column in ("probe_a_raw_sha", "probe_a_norm_sha"):
+            conn.execute(f"ALTER TABLE observation DROP COLUMN {column}")
+        conn.execute("UPDATE schema_meta SET value='2' WHERE key='schema_version'")
+        conn.commit()
+        conn.close()
+
+        index = ObservationIndex(path)
+        try:
+            assert index.schema_version == SCHEMA_VERSION
+            columns = {
+                row["name"] for row in index.connection.execute("PRAGMA table_xinfo(observation)")
+            }
+            assert {"probe_a_raw_sha", "probe_a_norm_sha"} <= columns
+        finally:
+            index.close()
 
     def test_a_corpus_from_a_newer_build_is_refused(self, v1_database):
         conn = sqlite3.connect(v1_database)

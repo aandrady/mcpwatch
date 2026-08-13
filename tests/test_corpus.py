@@ -159,6 +159,92 @@ class TestSnapshots:
         assert write.observation.status is ObservationStatus.NONDETERMINISTIC
         assert write.observation.norm_sha is not None
 
+    def test_the_disagreeing_probe_is_stored_and_stays_diffable(self, corpus):
+        """The point of keeping it: recover *what* differed, not just that it did.
+
+        Two hashes that are known to differ answer nothing. The pair of
+        documents says the description moved and the tool set did not, which is
+        the difference between per-read volatility and a mutation.
+        """
+        key = register(corpus)
+        probe_a = manifest(description="Read a file from disk. [req 8f21]")
+        probe_b = manifest(description="Read a file from disk. [req c40d]")
+
+        write = corpus.record_snapshot(
+            run_id=corpus.start_run("manifest", "0.1.0"),
+            server_key=key,
+            layer=MANIFEST,
+            document=probe_b,
+            status=ObservationStatus.NONDETERMINISTIC,
+            probe_a_document=probe_a,
+        )
+
+        assert write.observation.probe_a_raw_sha is not None
+        assert write.observation.probe_a_norm_sha is not None
+        assert write.observation.probe_a_norm_sha != write.observation.norm_sha
+        # Both readings come back whole, so the diff is reconstructable later.
+        assert corpus.load_document(write.observation.probe_a_raw_sha) == probe_a
+        assert corpus.load_document(write.observation.raw_sha) == probe_b
+        assert corpus.load_bytes(write.observation.probe_a_norm_sha) == canonical_bytes(probe_a)
+
+    def test_the_disagreeing_probe_costs_nothing_when_only_order_moved(self, corpus):
+        """Normalization still applies to it, so a reorder dedupes to one blob."""
+        key = register(corpus)
+        write = corpus.record_snapshot(
+            run_id=corpus.start_run("manifest", "0.1.0"),
+            server_key=key,
+            layer=MANIFEST,
+            document=manifest(),
+            status=ObservationStatus.NONDETERMINISTIC,
+            probe_a_document=reordered_manifest(),
+        )
+        assert write.observation.probe_a_norm_sha == write.observation.norm_sha
+
+    def test_the_disagreeing_probe_is_covered_by_the_integrity_sweep(self, corpus):
+        """A blob nothing references is a blob nothing protects."""
+        key = register(corpus)
+        write = corpus.record_snapshot(
+            run_id=corpus.start_run("manifest", "0.1.0"),
+            server_key=key,
+            layer=MANIFEST,
+            document=manifest("b"),
+            status=ObservationStatus.NONDETERMINISTIC,
+            probe_a_document=manifest("a"),
+        )
+        referenced = set(corpus.index.referenced_digests())
+        assert write.observation.probe_a_raw_sha in referenced
+        assert write.observation.probe_a_norm_sha in referenced
+        assert corpus.missing_blobs() == []
+
+    def test_a_disagreeing_probe_is_refused_on_an_agreeing_observation(self, corpus):
+        """The column pair asserts 'these two readings disagreed'.
+
+        Allowing it on an OK row would make that claim false in the data, and
+        every later reading of the quarantine would inherit the lie.
+        """
+        key = register(corpus)
+        with pytest.raises(ValueError, match="NONDETERMINISTIC"):
+            corpus.record_snapshot(
+                run_id=corpus.start_run("manifest", "0.1.0"),
+                server_key=key,
+                layer=MANIFEST,
+                document=manifest(),
+                status=ObservationStatus.OK,
+                probe_a_document=manifest("other"),
+            )
+
+    def test_an_ordinary_snapshot_leaves_the_probe_columns_empty(self, corpus):
+        key = register(corpus)
+        write = corpus.record_snapshot(
+            run_id=corpus.start_run("manifest", "0.1.0"),
+            server_key=key,
+            layer=MANIFEST,
+            document=manifest(),
+        )
+        assert write.observation.probe_a_raw_sha is None
+        assert write.observation.probe_a_norm_sha is None
+        assert write.probe_a is None
+
     def test_a_nondeterministic_observation_is_not_a_baseline(self, corpus):
         key = register(corpus)
         run_id = corpus.start_run("manifest", "0.1.0")

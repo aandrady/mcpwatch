@@ -158,6 +158,11 @@ class Observation:
       history; NULL everywhere else.
     * ``effective_at`` — the chronology key, ``published_at`` falling back to
       ``observed_at``. Derived in SQL, so it cannot drift from that definition.
+
+    ``probe_a_raw_sha`` and ``probe_a_norm_sha`` are set only on a
+    ``NONDETERMINISTIC`` row, and address the counterpart reading that
+    disagreed. Whatever differs between that pair varies per read rather than
+    over time, which is the distinction the quarantine exists to draw.
     """
 
     obs_id: int
@@ -173,6 +178,8 @@ class Observation:
     error_detail: str | None
     published_at: str | None
     effective_at: str
+    probe_a_raw_sha: str | None = None
+    probe_a_norm_sha: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Observation:
@@ -191,6 +198,8 @@ class Observation:
             error_detail=row["error_detail"],
             published_at=row["published_at"],
             effective_at=row["effective_at"],
+            probe_a_raw_sha=row["probe_a_raw_sha"],
+            probe_a_norm_sha=row["probe_a_norm_sha"],
         )
 
 

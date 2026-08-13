@@ -66,11 +66,15 @@ class SnapshotWrite:
     raw: BlobWrite
     normalized: BlobWrite
     changed: bool
+    probe_a: tuple[BlobWrite, BlobWrite] | None = None
 
     @property
     def bytes_written(self) -> int:
         """Compressed bytes newly written to disk for this snapshot."""
-        return self.raw.bytes_written + self.normalized.bytes_written
+        total = self.raw.bytes_written + self.normalized.bytes_written
+        if self.probe_a is not None:
+            total += sum(write.bytes_written for write in self.probe_a)
+        return total
 
 
 def _new_run_id(collector: str) -> str:
@@ -254,6 +258,8 @@ class Corpus:
         status: ObservationStatus = ObservationStatus.OK,
         error_class: str | None = None,
         error_detail: str | None = None,
+        probe_a_document: JsonValue | None = None,
+        probe_a_raw_bytes: bytes | None = None,
     ) -> SnapshotWrite:
         """Store a snapshot's raw and canonical blobs and append an observation.
 
@@ -279,6 +285,14 @@ class Corpus:
                 observation, e.g. WP3 recording that only one of its two probes
                 came back so determinism could not be verified.
             error_detail: Free-text companion to ``error_class``.
+            probe_a_document: The counterpart reading when a double probe
+                disagreed — the manifest the *other* probe of this same cycle
+                returned. Stored alongside ``document`` so the disagreement is
+                a diffable pair rather than two hashes that are known to differ
+                for reasons nobody can recover. Only meaningful with
+                ``NONDETERMINISTIC``.
+            probe_a_raw_bytes: Wire bytes for ``probe_a_document``, on the same
+                terms as ``raw_bytes``.
 
         Returns:
             A :class:`SnapshotWrite` reporting the bytes actually written and
@@ -286,7 +300,17 @@ class Corpus:
 
         Raises:
             CanonicalizationError: If the document cannot be canonicalized.
+            ValueError: If ``probe_a_document`` is supplied on a status other
+                than ``NONDETERMINISTIC``. The column pair means "these two
+                readings disagreed"; letting it be set on an agreeing
+                observation would make that claim untrue in the data.
         """
+        if probe_a_document is not None and status is not ObservationStatus.NONDETERMINISTIC:
+            msg = (
+                "probe_a_document records a disagreement between two probes, so it "
+                f"belongs only on a NONDETERMINISTIC observation, not {status}"
+            )
+            raise ValueError(msg)
         norm = canonical_bytes(document, self.policy)
         raw = raw_bytes if raw_bytes is not None else self._fallback_raw_bytes(document)
         moment = to_iso(observed_at or utcnow())
@@ -300,6 +324,15 @@ class Corpus:
             )
             raw_write = self.blobs.put(raw)
             norm_write = self.blobs.put(norm)
+            probe_a_writes: tuple[BlobWrite, BlobWrite] | None = None
+            if probe_a_document is not None:
+                probe_a_norm = canonical_bytes(probe_a_document, self.policy)
+                probe_a_raw = (
+                    probe_a_raw_bytes
+                    if probe_a_raw_bytes is not None
+                    else self._fallback_raw_bytes(probe_a_document)
+                )
+                probe_a_writes = (self.blobs.put(probe_a_raw), self.blobs.put(probe_a_norm))
             obs_id = self.index.insert_observation(
                 run_id=run_id,
                 server_key=server_key,
@@ -312,6 +345,8 @@ class Corpus:
                 error_class=error_class,
                 error_detail=error_detail,
                 published_at=published,
+                probe_a_raw_sha=None if probe_a_writes is None else probe_a_writes[0].digest,
+                probe_a_norm_sha=None if probe_a_writes is None else probe_a_writes[1].digest,
             )
             # Widen the server's known interval by when this state was true, not
             # by when we read about it: reading a 2024 version today is evidence
@@ -328,6 +363,7 @@ class Corpus:
             raw=raw_write,
             normalized=norm_write,
             changed=previous is None or previous.norm_sha != norm_write.digest,
+            probe_a=probe_a_writes,
         )
 
     def record_failure(
