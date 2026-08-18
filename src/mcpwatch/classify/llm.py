@@ -182,9 +182,20 @@ class LlmClassifier:
         return self._client
 
     def classify(
-        self, changeset: ChangeSet, hits: list[RuleHit] | None = None, *, refresh: bool = False
+        self,
+        changeset: ChangeSet,
+        hits: list[RuleHit] | None = None,
+        *,
+        refresh: bool = False,
+        persist: bool = True,
     ) -> LlmVerdict:
         """Label one ChangeSet, using the cache unless ``refresh`` is set.
+
+        ``persist=False`` asks without recording. The drift check needs exactly
+        that: writing the answer back would overwrite the baseline through
+        :meth:`ClassifyStore.put_machine_label`, which keys on
+        ``(change_id, source, model_id, prompt_sha)`` — so a drift run that
+        persisted would destroy the very comparison it exists to make.
 
         Raises:
             ValueError: If the model returns something outside the schema. The
@@ -209,7 +220,8 @@ class LlmClassifier:
                 )
 
         verdict = self._ask(changeset, hits or [])
-        self.store.put_machine_label(verdict.as_machine_label())
+        if persist:
+            self.store.put_machine_label(verdict.as_machine_label())
         return verdict
 
     def _ask(self, changeset: ChangeSet, hits: list[RuleHit]) -> LlmVerdict:

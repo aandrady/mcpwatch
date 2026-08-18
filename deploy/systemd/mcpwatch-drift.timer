@@ -1,0 +1,13 @@
+[Unit]
+Description=Monthly MCPWatch classifier drift check
+
+[Timer]
+# Monthly, on the 1st, clear of every collector window (03:00-06:00 UTC) and of
+# the sandbox at 07:00. WP7 asks for monthly re-adjudication over a fixed set;
+# more often would spend tokens without adding resolution, since the thing being
+# watched is a model changing underneath a pinned id.
+OnCalendar=*-*-01 09:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -18,7 +18,8 @@ systemctl --user enable --now \
     mcpwatch-registry-full.timer \
     mcpwatch-manifest.timer \
     mcpwatch-backup.timer \
-    mcpwatch-health.timer
+    mcpwatch-health.timer \
+    mcpwatch-drift.timer
 
 # mcpwatch-sandbox.timer is installed above but deliberately NOT enabled.
 #
@@ -52,4 +53,14 @@ Useful commands:
     uv run python -m mcpwatch.health                      # check right now
     uv run python -m mcpwatch.backup --verify-only        # is the backup sound?
     uv run python -m mcpwatch.backup --restore-to /tmp/rehearsal   # restore drill
+
+WP7 adjudication:
+    uv run python -m mcpwatch.classify export --out /tmp/rating.html   # bundle for rater two
+    uv run python -m mcpwatch.classify import labels.json --rater bob  # merge what they returned
+    uv run python -m mcpwatch.classify reliability                     # kappa, overall and per class
+    uv run python -m mcpwatch.classify drift                           # what the monthly timer runs
+
+The drift timer is enabled but inert until the model layer has a baseline. With
+no ANTHROPIC_API_KEY in ~/.config/mcpwatch/env it exits 0 reporting there is
+nothing to drift from, rather than failing for a decision nobody has taken.
 NOTE
