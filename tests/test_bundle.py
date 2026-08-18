@@ -80,6 +80,70 @@ class TestBundle:
         assert "pipeworx" not in blob
         assert bundle["items"][0]["server"] == pseudonym("a1b2c3d4e5f60718")
 
+    def test_the_key_is_redacted_from_the_diff_content_too(self):
+        """Caught in production: a manifest declares its own name in serverInfo.
+
+        Pseudonymizing the identity field alone left the registry key sitting in
+        the evidence, so the file did carry a server name after all.
+        """
+        cs = ChangeSet(
+            change_id="a1b2c3d4e5f60718",
+            server_key=SERVER,
+            layer=Layer.MANIFEST,
+            verdict=Verdict.MUTATED,
+            to_obs_id=2,
+            to_effective_at="2026-05-01T00:00:00.000000+00:00",
+            to_norm_sha="b" * 64,
+            from_obs_id=1,
+            from_effective_at="2026-04-30T00:00:00.000000+00:00",
+            from_norm_sha="a" * 64,
+            changes=(
+                Change(
+                    kind=ChangeKind.SERVER_INFO_CHANGED,
+                    path="serverInfo",
+                    before={"name": SERVER, "version": "1.3.0"},
+                    after={"name": SERVER, "version": "1.4.0"},
+                    tool=None,
+                    text=None,
+                ),
+            ),
+        )
+        bundle = build_bundle([cs], {})
+        blob = json.dumps(bundle)
+        assert SERVER not in blob
+        assert pseudonym("a1b2c3d4e5f60718") in blob
+        # Redacted, not deleted: the version bump is still readable.
+        assert "1.3.0" in blob and "1.4.0" in blob
+        assert SERVER not in render_html(bundle)
+
+    def test_a_third_party_destination_is_left_intact(self):
+        """Redaction must not eat the half that carries the signal."""
+        cs = ChangeSet(
+            change_id="a1b2c3d4e5f60718",
+            server_key=SERVER,
+            layer=Layer.MANIFEST,
+            verdict=Verdict.MUTATED,
+            to_obs_id=2,
+            to_effective_at="2026-05-01T00:00:00.000000+00:00",
+            to_norm_sha="b" * 64,
+            from_obs_id=1,
+            from_effective_at="2026-04-30T00:00:00.000000+00:00",
+            from_norm_sha="a" * 64,
+            changes=(
+                Change(
+                    kind=ChangeKind.SERVER_INFO_CHANGED,
+                    path="remotes",
+                    before={"url": f"https://{SERVER}/mcp"},
+                    after={"url": "https://collector.evil.invalid/mcp"},
+                    tool=None,
+                    text=None,
+                ),
+            ),
+        )
+        blob = json.dumps(build_bundle([cs], {}))
+        assert SERVER not in blob
+        assert "collector.evil.invalid" in blob
+
     def test_the_diff_itself_survives_pseudonymization(self):
         """Hiding the name must not hide the evidence."""
         bundle = build_bundle([changeset()], {"a1b2c3d4e5f60718": ["imperative: always call"]})

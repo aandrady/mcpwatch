@@ -14,14 +14,23 @@ identical wording. It carries **no labels of any kind** — not the rules', not
 the model's, not the other rater's — so blindness holds by construction rather
 than by remembering not to pass ``--show-llm``.
 
-**Server identity is pseudonymized.** Two reasons, and the second matters more.
-It means the file can go to someone outside the project without carrying server
-names, per the disclosure rules in ``FRAMING.md``. But mainly: one publisher
-owns 689 servers in this population, and a rater who recognises the fleet is no
-longer judging the diff in front of them. The pseudonym derives from the
-change_id, which is itself ``sha256(server_key|from_obs|to_obs)`` truncated, so
-the mapping back lives only in the corpus and the bundle cannot be reversed on
-its own.
+**Server identity is pseudonymized, and the guarantee is narrower than it
+sounds.** The registry key is replaced everywhere it appears — including inside
+the diff, because a manifest declares its own name in ``serverInfo`` and
+pseudonymizing only the identity field leaves the key sitting in the evidence.
+The pseudonym derives from the change_id, itself
+``sha256(server_key|from_obs|to_obs)`` truncated, so the mapping back lives only
+in the corpus.
+
+What that does **not** buy is anonymity of the publisher. Tool names, URLs and
+prose are the evidence a rater has to read, and a publisher's brand is often all
+through them; scrubbing that would leave nothing to judge. So a bundle is safe
+to hand to a collaborator and is not a publishable artifact — the disclosure
+rules in ``FRAMING.md`` govern what gets published, and this is not that.
+
+The point that survives in full is the anchoring one: one publisher owns 689
+servers in this population, and a rater who recognises the fleet from its
+registry key is no longer judging the diff in front of them.
 """
 
 import html
@@ -76,19 +85,40 @@ class BundleItem:
         }
 
 
+def _redact(text: str, server_key: str, alias: str) -> str:
+    """Replace the server's registry key with its pseudonym inside diff content.
+
+    A manifest declares its own name — ``serverInfo.name`` is literally the
+    registry key — so pseudonymizing the identity field alone leaves the key
+    sitting in the evidence. Substituting rather than deleting keeps the change
+    readable: an endpoint moving away from the server's own host still reads as
+    a move, and the destination it moved *to* is untouched, which is the half
+    that matters for `exfiltration_addition`.
+    """
+    if not server_key:
+        return text
+    return text.replace(server_key, alias)
+
+
 def _summarize(changeset: ChangeSet, limit: int = 25) -> list[dict[str, Any]]:
     """Flatten a ChangeSet's changes into something renderable and stable."""
     out: list[dict[str, Any]] = []
+    alias = pseudonym(changeset.change_id)
+    key = changeset.server_key
+
+    def clean(value: str) -> str:
+        return _redact(value, key, alias)
+
     for change in changeset.changes[:limit]:
-        entry: dict[str, Any] = {"kind": str(change.kind), "path": change.path}
+        entry: dict[str, Any] = {"kind": str(change.kind), "path": clean(change.path)}
         if change.text is not None and change.text.added:
-            entry["added"] = " ".join(change.text.added)[:1500]
+            entry["added"] = clean(" ".join(change.text.added))[:1500]
             if change.text.removed:
-                entry["removed"] = " ".join(change.text.removed)[:800]
+                entry["removed"] = clean(" ".join(change.text.removed))[:800]
         else:
             if change.before is not None:
-                entry["before"] = json.dumps(change.before, ensure_ascii=False)[:800]
-            entry["after"] = json.dumps(change.after, ensure_ascii=False)[:800]
+                entry["before"] = clean(json.dumps(change.before, ensure_ascii=False))[:800]
+            entry["after"] = clean(json.dumps(change.after, ensure_ascii=False))[:800]
         out.append(entry)
     if len(changeset.changes) > limit:
         out.append({"kind": "elided", "path": f"... {len(changeset.changes) - limit} more changes"})

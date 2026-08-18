@@ -59,11 +59,33 @@ def _store_path(corpus_root: Path) -> Path:
     return corpus_root / "classify.db"
 
 
-def _changesets(corpus: Corpus, layer: Layer, limit: int | None = None) -> list[ChangeSet]:
+def _changesets(
+    corpus: Corpus,
+    layer: Layer,
+    limit: int | None = None,
+    *,
+    include_quarantined: bool = False,
+) -> list[ChangeSet]:
+    """ChangeSets for this layer, quarantined servers excluded by default.
+
+    ``include_quarantined`` is for resolving items that were *already drawn*.
+    The quarantine is a sticky per-server verdict — any server ever recorded
+    nondeterministic loses its whole history from the pool — which is right
+    when sampling and wrong when opening a fixed set: a server that started
+    flapping last week does not change what its diff from a fortnight ago was.
+
+    Not hypothetical. The calibration set drawn 2026-08-12 lost 17 of its 200
+    items this way within two days, 15 of them one publisher's fleet, and the
+    set is required to be fixed — ``calibration_item`` says so in the schema.
+    A shrinking set makes κ incomparable month to month and would have had the
+    drift job measuring the sample rather than the classifier.
+    """
     engine = DiffEngine(corpus)
     out: list[ChangeSet] = []
     for changeset in engine.changesets(layer=layer):
-        if not changeset.changes or changeset.quarantined:
+        if not changeset.changes:
+            continue
+        if changeset.quarantined and not include_quarantined:
             continue
         out.append(changeset)
         if limit is not None and len(out) >= limit:
@@ -251,7 +273,11 @@ def _adjudicate(args: argparse.Namespace) -> int:
         pool: dict[str, ChangeSet] = {}
         for layer, ids in wanted.items():
             pool.update(
-                {c.change_id: c for c in _changesets(corpus, Layer(layer)) if c.change_id in ids}
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
             )
 
         choices = list(Label)
@@ -333,7 +359,11 @@ def _export(args: argparse.Namespace) -> int:
         pool: dict[str, ChangeSet] = {}
         for layer, ids in wanted.items():
             pool.update(
-                {c.change_id: c for c in _changesets(corpus, Layer(layer)) if c.change_id in ids}
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
             )
 
         ordered = [pool[row["change_id"]] for row in rows if row["change_id"] in pool]
@@ -361,8 +391,10 @@ def _export(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     print(
-        "Send this file to the second rater. It contains no labels and no server "
-        "names; they return a labels JSON for `import`."
+        "Send this file to the second rater: it carries no labels, and every server's "
+        "registry key is replaced by a pseudonym. Tool names and prose are the evidence "
+        "and are left intact, so a publisher may still be recognisable — this is a file "
+        "for a collaborator, not a publishable artifact."
     )
     return 0
 
@@ -460,7 +492,11 @@ def _drift(args: argparse.Namespace) -> int:
         pool: dict[str, ChangeSet] = {}
         for layer, ids in by_layer.items():
             pool.update(
-                {c.change_id: c for c in _changesets(corpus, Layer(layer)) if c.change_id in ids}
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
             )
 
         classifier = LlmClassifier(store, model_id=args.model)
