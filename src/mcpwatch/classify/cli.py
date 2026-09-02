@@ -22,16 +22,25 @@ import json
 import os
 import random
 import sys
+import time
 from pathlib import Path
 
 from mcpwatch.diff import ChangeSet, DiffEngine
 from mcpwatch.store import Corpus, Layer
 
 from . import reliability
+from .bundle import build_bundle, parse_labels, render_html
 from .llm import MODEL_ID, LlmClassifier
+from .prompt_v1 import PROMPT_SHA
 from .rules import classify as rule_classify
 from .rules import describe, evaluate
-from .store import Adjudication, CalibrationFrame, ClassifyStore, MachineLabel
+from .store import (
+    Adjudication,
+    CalibrationFrame,
+    ClassifyStore,
+    DriftCheck,
+    MachineLabel,
+)
 from .taxonomy import Label, definition
 
 __all__ = ["main"]
@@ -50,11 +59,33 @@ def _store_path(corpus_root: Path) -> Path:
     return corpus_root / "classify.db"
 
 
-def _changesets(corpus: Corpus, layer: Layer, limit: int | None = None) -> list[ChangeSet]:
+def _changesets(
+    corpus: Corpus,
+    layer: Layer,
+    limit: int | None = None,
+    *,
+    include_quarantined: bool = False,
+) -> list[ChangeSet]:
+    """ChangeSets for this layer, quarantined servers excluded by default.
+
+    ``include_quarantined`` is for resolving items that were *already drawn*.
+    The quarantine is a sticky per-server verdict — any server ever recorded
+    nondeterministic loses its whole history from the pool — which is right
+    when sampling and wrong when opening a fixed set: a server that started
+    flapping last week does not change what its diff from a fortnight ago was.
+
+    Not hypothetical. The calibration set drawn 2026-08-12 lost 17 of its 200
+    items this way within two days, 15 of them one publisher's fleet, and the
+    set is required to be fixed — ``calibration_item`` says so in the schema.
+    A shrinking set makes κ incomparable month to month and would have had the
+    drift job measuring the sample rather than the classifier.
+    """
     engine = DiffEngine(corpus)
     out: list[ChangeSet] = []
     for changeset in engine.changesets(layer=layer):
-        if not changeset.changes or changeset.quarantined:
+        if not changeset.changes:
+            continue
+        if changeset.quarantined and not include_quarantined:
             continue
         out.append(changeset)
         if limit is not None and len(out) >= limit:
@@ -242,7 +273,11 @@ def _adjudicate(args: argparse.Namespace) -> int:
         pool: dict[str, ChangeSet] = {}
         for layer, ids in wanted.items():
             pool.update(
-                {c.change_id: c for c in _changesets(corpus, Layer(layer)) if c.change_id in ids}
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
             )
 
         choices = list(Label)
@@ -272,6 +307,7 @@ def _adjudicate(args: argparse.Namespace) -> int:
                 print(f"  {number}. {label}")
             print("  ?. show definitions   s. skip   q. quit")
 
+            asked_at = time.monotonic()
             while True:
                 answer = input("label> ").strip().lower()
                 if answer == "q":
@@ -288,13 +324,244 @@ def _adjudicate(args: argparse.Namespace) -> int:
                     notes = input("notes (optional)> ").strip() or None
                     store.add_adjudication(
                         Adjudication(
-                            change_id=change_id, rater=args.rater, label=str(label), notes=notes
+                            change_id=change_id,
+                            rater=args.rater,
+                            label=str(label),
+                            notes=notes,
+                            seconds_spent=round(time.monotonic() - asked_at, 1),
                         )
                     )
                     print(f"recorded {label}")
                     break
                 print("enter a number, ? for definitions, s to skip, or q to quit")
     return 0
+
+
+# ------------------------------------------------------------------ export ---
+
+
+def _export(args: argparse.Namespace) -> int:
+    """Write the calibration set as a self-contained rating file.
+
+    The bundle carries no labels — not the rules', not the model's, not the
+    other rater's. Blindness is then a property of the artifact rather than of
+    the reviewer remembering which flag to leave off.
+    """
+    with Corpus(args.corpus) as corpus, ClassifyStore(_store_path(args.corpus)) as store:
+        rows = store.calibration_set()
+        if not rows:
+            print("no calibration set drawn yet; run `sample` first", file=sys.stderr)
+            return 1
+
+        wanted: dict[str, set[str]] = {}
+        for row in rows:
+            wanted.setdefault(row["layer"] or args.layer, set()).add(row["change_id"])
+        pool: dict[str, ChangeSet] = {}
+        for layer, ids in wanted.items():
+            pool.update(
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
+            )
+
+        ordered = [pool[row["change_id"]] for row in rows if row["change_id"] in pool]
+        missing = len(rows) - len(ordered)
+        evidence = {
+            c.change_id: [
+                f"{hit.rule}: {describe(hit.rule)} — {hit.evidence}" for hit in evaluate(c)
+            ]
+            for c in ordered
+        }
+        frames = store.calibration_frames()
+        frame = dict(frames[-1]) if frames else {}
+
+    bundle = build_bundle(ordered, evidence, frame=frame)
+    out = Path(args.out)
+    if args.format == "json":
+        out.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+    else:
+        out.write_text(render_html(bundle), encoding="utf-8")
+    print(f"wrote {len(ordered)} item(s) to {out}")
+    if missing:
+        print(
+            f"note: {missing} calibration item(s) did not resolve to a ChangeSet and "
+            "were left out of the bundle",
+            file=sys.stderr,
+        )
+    print(
+        "Send this file to the second rater: it carries no labels, and every server's "
+        "registry key is replaced by a pseudonym. Tool names and prose are the evidence "
+        "and are left intact, so a publisher may still be recognisable — this is a file "
+        "for a collaborator, not a publishable artifact."
+    )
+    return 0
+
+
+# ------------------------------------------------------------------ import ---
+
+
+def _import(args: argparse.Namespace) -> int:
+    """Merge a rater's returned labels under their own rater id."""
+    try:
+        payload = json.loads(Path(args.labels).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {args.labels}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        labels = parse_labels(payload)
+    except ValueError as exc:
+        print(f"refusing to import: {exc}", file=sys.stderr)
+        return 1
+
+    with ClassifyStore(_store_path(args.corpus)) as store:
+        known = {row["change_id"] for row in store.calibration_set()}
+        # An id outside the calibration set means the file was produced against
+        # a different draw. Importing it anyway would put κ over a set nobody
+        # can reconstruct, so it stops here rather than being tidied away.
+        stray = sorted(set(labels) - known)
+        if stray:
+            print(
+                f"refusing to import: {len(stray)} label(s) are not in this calibration "
+                f"set (first: {stray[0]}). Was this bundle exported from a different draw?",
+                file=sys.stderr,
+            )
+            return 1
+
+        already = set(store.rater_labels(args.rater))
+        added = reused = 0
+        with store.transaction():
+            for change_id, entry in labels.items():
+                if change_id in already and not args.relabel:
+                    reused += 1
+                    continue
+                store.add_adjudication(
+                    Adjudication(
+                        change_id=change_id,
+                        rater=args.rater,
+                        label=entry["label"],
+                        notes=entry["notes"],
+                        seconds_spent=entry["seconds"],
+                    )
+                )
+                added += 1
+        total = len(store.rater_labels(args.rater))
+
+    print(f"imported {added} label(s) for rater {args.rater!r}; {total} held in total")
+    if reused:
+        print(f"{reused} already labelled by this rater and left alone (pass --relabel to add)")
+    return 0
+
+
+# ------------------------------------------------------------------- drift ---
+
+
+def _drift(args: argparse.Namespace) -> int:
+    """Re-ask the model about the fixed calibration set and compare.
+
+    WP7 pins the model id, but a pinned id is not a pinned model. This is the
+    check that makes that confound observable: same items, same prompt, asked
+    again, compared against what the corpus already held.
+
+    Nothing is written back to ``machine_label`` unless ``--accept`` is passed.
+    Silently adopting this month's answer is how drift becomes undetectable.
+    """
+    with Corpus(args.corpus) as corpus, ClassifyStore(_store_path(args.corpus)) as store:
+        rows = store.calibration_set()
+        if not rows:
+            print("no calibration set drawn yet; nothing to check")
+            return 0
+
+        baseline = store.machine_labels(source="llm")
+        wanted = {row["change_id"] for row in rows} & set(baseline)
+        if not wanted:
+            # Not a failure. The model layer has simply never run — which is a
+            # missing credential, not drift — and a unit that red-lines for that
+            # would be an alarm nobody could clear.
+            print(
+                "no model labels over the calibration set yet, so there is no baseline "
+                "to drift from; run `run --llm --calibration-only` first"
+            )
+            return 0
+
+        by_layer: dict[str, set[str]] = {}
+        for row in rows:
+            if row["change_id"] in wanted:
+                by_layer.setdefault(row["layer"] or args.layer, set()).add(row["change_id"])
+        pool: dict[str, ChangeSet] = {}
+        for layer, ids in by_layer.items():
+            pool.update(
+                {
+                    c.change_id: c
+                    for c in _changesets(corpus, Layer(layer), include_quarantined=True)
+                    if c.change_id in ids
+                }
+            )
+
+        classifier = LlmClassifier(store, model_id=args.model)
+        checks: list[DriftCheck] = []
+        failed = 0
+        for change_id in sorted(wanted):
+            changeset = pool.get(change_id)
+            if changeset is None:
+                continue
+            try:
+                verdict = classifier.classify(
+                    changeset, list(evaluate(changeset)), refresh=True, persist=False
+                )
+            except Exception as exc:
+                failed += 1
+                print(f"  {change_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                continue
+            checks.append(
+                DriftCheck(
+                    change_id=change_id,
+                    source="llm",
+                    baseline_label=baseline[change_id],
+                    observed_label=str(verdict.label),
+                    model_id=args.model,
+                    prompt_sha=PROMPT_SHA,
+                )
+            )
+
+        if not checks:
+            print(f"no items could be re-checked ({failed} failed)", file=sys.stderr)
+            return 1
+
+        moved = [c for c in checks if not c.agreed]
+        with store.transaction():
+            checked_at = store.record_drift(checks)
+            if args.accept and moved:
+                for check in moved:
+                    store.put_machine_label(
+                        MachineLabel(
+                            change_id=check.change_id,
+                            source="llm",
+                            label=check.observed_label,
+                            model_id=check.model_id,
+                            prompt_sha=check.prompt_sha,
+                        )
+                    )
+
+    print(f"drift check {checked_at}: {len(checks)} item(s), {len(moved)} changed label")
+    for check in moved:
+        print(f"  {check.change_id}  {check.baseline_label} -> {check.observed_label}")
+    if failed:
+        print(f"{failed} item(s) could not be re-checked", file=sys.stderr)
+    if not moved:
+        return 0
+    if args.accept:
+        print(f"\n--accept: {len(moved)} baseline label(s) updated to this run's answers")
+        return 0
+    print(
+        "\nThe pinned model no longer gives the labels the corpus holds. Any number "
+        "resting on those labels was computed under the old answers.\n"
+        "Re-baseline deliberately with `drift --accept` once you have decided the new "
+        "labels are the ones to keep.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 # ------------------------------------------------------------- reliability ---
@@ -408,6 +675,35 @@ def main(argv: list[str] | None = None) -> int:
         "while adjudicating the calibration set",
     )
     adjudicate.set_defaults(func=_adjudicate)
+
+    export = sub.add_parser("export", help="write the calibration set as a portable rating file")
+    export.add_argument("--out", required=True, help="destination path")
+    export.add_argument(
+        "--format",
+        choices=("html", "json"),
+        default="html",
+        help="html is the rater-facing form; json is the same bundle for tooling",
+    )
+    export.set_defaults(func=_export)
+
+    load = sub.add_parser("import", help="merge a rater's returned labels")
+    load.add_argument("labels", help="the JSON file the rater sent back")
+    load.add_argument("--rater", required=True, help="whose labels these are")
+    load.add_argument(
+        "--relabel",
+        action="store_true",
+        help="append even where this rater already has a label for the item",
+    )
+    load.set_defaults(func=_import)
+
+    drift = sub.add_parser("drift", help="re-ask the model about the calibration set and compare")
+    drift.add_argument(
+        "--accept",
+        action="store_true",
+        help="adopt this run's answers as the new baseline; deliberate by design",
+    )
+    drift.add_argument("--model", default=MODEL_ID)
+    drift.set_defaults(func=_drift)
 
     score = sub.add_parser("reliability", help="Cohen's kappa, overall and per class")
     score.add_argument("--json", action="store_true")

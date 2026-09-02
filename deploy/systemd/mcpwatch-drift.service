@@ -1,0 +1,31 @@
+[Unit]
+Description=MCPWatch classifier drift check over the fixed calibration set
+Documentation=https://github.com/aandrady/mcpwatch
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/mcpwatch
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
+
+# Reads a credential from an environment file that is deliberately NOT in git
+# and NOT required to exist. Without it the model layer has never run, the check
+# finds no baseline, and it exits 0 saying so — the unit does not red-line for a
+# missing key, because that is a decision nobody has taken yet rather than a
+# fault. Create it mode 0600 when the key exists:
+#
+#     install -m 0600 /dev/null ~/.config/mcpwatch/env
+#     printf 'ANTHROPIC_API_KEY=...\n' > ~/.config/mcpwatch/env
+EnvironmentFile=-%h/.config/mcpwatch/env
+
+ExecStart=%h/.local/bin/uv run python -m mcpwatch.classify --layer manifest drift
+
+# A non-zero exit means the pinned model returned different labels than the ones
+# the corpus holds, which is the confound WP7 names and the reason this runs at
+# all. It surfaces in `systemctl --user list-units --failed`. Unlike a stale-run
+# alarm this one has a defined clearing action — decide whether the new labels
+# are the ones to keep, then `classify drift --accept`.
+TimeoutStartSec=3600
+Nice=15
+
+# No [Install]: activated by its timer only.

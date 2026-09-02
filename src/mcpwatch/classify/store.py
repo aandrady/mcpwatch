@@ -17,16 +17,16 @@ the taxonomy's clarity, and overwriting it would destroy that.
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from mcpwatch.store import to_iso, utcnow
 
-__all__ = ["Adjudication", "CalibrationFrame", "ClassifyStore", "MachineLabel"]
+__all__ = ["Adjudication", "CalibrationFrame", "ClassifyStore", "DriftCheck", "MachineLabel"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -113,6 +113,48 @@ CREATE TABLE IF NOT EXISTS calibration_frame (
     added        INTEGER NOT NULL,
     created_at   TEXT NOT NULL
 );
+
+-- Monthly drift over the fixed calibration set.
+--
+-- A pinned model id is not a pinned model: a provider can move what the id
+-- points at, and the same prompt against the same ChangeSet can come back
+-- labelled differently a month later. That is the confound WP7 names, and it is
+-- invisible to `machine_label` on its own — `put_machine_label` overwrites on
+-- identical (change_id, source, model_id, prompt_sha), so a re-run under the
+-- pin would quietly destroy the baseline it was supposed to be compared
+-- against. These rows are the comparison, kept beside the labels rather than
+-- inside them, and never rewritten.
+--
+-- `baseline_label` is what the corpus held before the check ran. Re-baselining
+-- is deliberate and explicit (`classify drift --accept`), because silently
+-- adopting a new answer is how drift becomes undetectable.
+CREATE TABLE IF NOT EXISTS drift_check (
+    check_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at     TEXT NOT NULL,
+    change_id      TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    model_id       TEXT,
+    prompt_sha     TEXT,
+    baseline_label TEXT NOT NULL,
+    observed_label TEXT NOT NULL,
+    agreed         INTEGER NOT NULL,
+    CHECK (agreed IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS drift_check_run ON drift_check(checked_at);
+CREATE INDEX IF NOT EXISTS drift_check_change ON drift_check(change_id);
+
+CREATE TRIGGER IF NOT EXISTS drift_check_no_update
+BEFORE UPDATE ON drift_check
+BEGIN
+    SELECT RAISE(ABORT, 'drift_check is append-only: record a new check instead');
+END;
+
+CREATE TRIGGER IF NOT EXISTS drift_check_no_delete
+BEFORE DELETE ON drift_check
+BEGIN
+    SELECT RAISE(ABORT, 'drift_check is append-only: DELETE is forbidden');
+END;
 """
 
 
@@ -141,6 +183,23 @@ class Adjudication:
     label: str
     notes: str | None = None
     seconds_spent: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DriftCheck:
+    """One item's answer this month against the answer the corpus already held."""
+
+    change_id: str
+    source: str
+    baseline_label: str
+    observed_label: str
+    model_id: str | None = None
+    prompt_sha: str | None = None
+
+    @property
+    def agreed(self) -> bool:
+        """Whether the classifier said the same thing it said before."""
+        return self.baseline_label == self.observed_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +416,65 @@ class ClassifyStore:
         return {key: next(iter(value)) for key, value in labels.items() if len(value) == 1}
 
     # ------------------------------------------------------- calibration set ---
+
+    def record_drift(self, checks: Sequence[DriftCheck], *, checked_at: str | None = None) -> str:
+        """Append one drift run's results and return its timestamp.
+
+        One timestamp for the whole run, so a month's checks group together
+        without needing a separate run table.
+        """
+        moment = checked_at or to_iso(utcnow())
+        self._conn.executemany(
+            """
+            INSERT INTO drift_check(
+                checked_at, change_id, source, model_id, prompt_sha,
+                baseline_label, observed_label, agreed
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    moment,
+                    check.change_id,
+                    check.source,
+                    check.model_id,
+                    check.prompt_sha,
+                    check.baseline_label,
+                    check.observed_label,
+                    int(check.agreed),
+                )
+                for check in checks
+            ],
+        )
+        return moment
+
+    def drift_runs(self, limit: int = 12) -> list[sqlite3.Row]:
+        """Recent drift runs, newest first, with their agreement counts."""
+        return self._conn.execute(
+            """
+            SELECT checked_at,
+                   count(*) AS items,
+                   sum(agreed) AS agreed,
+                   count(*) - sum(agreed) AS moved
+            FROM drift_check
+            GROUP BY checked_at
+            ORDER BY checked_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    def drift_movements(self, checked_at: str) -> list[sqlite3.Row]:
+        """The items that changed label in one drift run."""
+        return self._conn.execute(
+            """
+            SELECT change_id, baseline_label, observed_label, model_id, prompt_sha
+            FROM drift_check
+            WHERE checked_at = ? AND agreed = 0
+            ORDER BY change_id
+            """,
+            (checked_at,),
+        ).fetchall()
 
     def add_calibration_items(self, items: Mapping[str, str | None], *, layer: str) -> int:
         """Add change_ids to the fixed calibration set. Returns how many were new.
