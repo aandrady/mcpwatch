@@ -59,6 +59,17 @@ historical debris forever, and an alarm that never clears is an alarm nobody
 reads. Freshness is what catches a collector that has stopped for good.
 """
 
+DEADLINE_WINDOW = timedelta(hours=36)
+"""How far back to look for cycles their own deadline cut short.
+
+A cut cycle closes itself honestly — ``finished_at`` set, what it collected
+kept — so freshness and volume see an ordinary finished run and
+``runs.no_stale_open`` never sees it at all. The servers it did not reach have
+no observation that day and Layer 2 cannot be backfilled, so it needs a check of
+its own. 36h guarantees at least one daily check sees every cut run however late
+it finished, and lets the alarm clear on its own afterwards.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Check:
@@ -159,6 +170,7 @@ def check_corpus(corpus: Corpus) -> HealthReport:
         stale_open == 0,
         f"{stale_open} run(s) died mid-cycle in the last {STALE_RUN_WINDOW.days} days",
     )
+    _check_deadlines(corpus, report, now)
 
     _check_coverage(corpus, report)
     _check_nondeterminism(corpus, report)
@@ -171,6 +183,36 @@ def check_corpus(corpus: Corpus) -> HealthReport:
     )
     _check_backup(report, now)
     return report
+
+
+def _check_deadlines(corpus: Corpus, report: HealthReport, now: datetime) -> None:
+    """Flag any recent run that its own deadline cut short.
+
+    Keyed on ``deadline_exceeded``, not ``truncated``: a staged rollout with
+    ``--limit`` is truncated on purpose and loses nothing, whereas a deadline
+    means the cycle wanted to go on and could not.
+    """
+    rows = corpus.index.connection.execute(
+        """
+        SELECT collector, started_at, stats_json FROM run
+        WHERE finished_at >= ?
+          AND coalesce(json_extract(stats_json, '$.deadline_exceeded'), 0) = 1
+        ORDER BY started_at
+        """,
+        (to_iso(now - DEADLINE_WINDOW),),
+    ).fetchall()
+    cut = []
+    for row in rows:
+        stats = json.loads(row["stats_json"])
+        of = stats.get("targets", stats.get("members"))
+        cut.append(f"{row['collector']} {row['started_at'][:16]} ({stats.get('probed')}/{of})")
+    hours = DEADLINE_WINDOW.total_seconds() / 3600
+    report.add(
+        "runs.no_deadline_exceeded",
+        not cut,
+        f"{len(cut)} run(s) cut short by their deadline in the last {hours:.0f}h"
+        + (f": {', '.join(cut)}" if cut else ""),
+    )
 
 
 def _check_backup(report: HealthReport, now: datetime) -> None:

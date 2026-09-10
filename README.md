@@ -357,10 +357,16 @@ uv run python -m mcpwatch.health
 ```
 
 Scheduling without detection is how a collector fails silently for two weeks. This runs daily at
-06:00 UTC and checks freshness per collector, crashed runs, registry coverage against the
-previous *full* crawl, the nondeterministic quarantine rate, and that every referenced blob is
-present. Everything is derived from the corpus itself, so the checks stay true even if a
-collector died before it could report anything.
+06:00 UTC — or once the night's manifest cycle and backup finish, if they are still going — and
+checks freshness per collector, crashed runs, cycles cut short by their own deadline, registry
+coverage against the previous *full* crawl, the nondeterministic quarantine rate, that every
+referenced blob is present, and that a fresh backup exists and verified. Everything is derived
+from the corpus itself, so the checks stay true even if a collector died before it could report
+anything.
+
+A cycle cut short by its deadline is the quiet case: it closes its run honestly and keeps what it
+collected, so freshness and volume see an ordinary finished run. The servers it never reached
+have no observation that day, and Layer 2 cannot be backfilled.
 
 A failure exits non-zero, which leaves the systemd unit failed — no mail transport or external
 alerting service needed:

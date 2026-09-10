@@ -2,6 +2,7 @@
 
 import json
 from datetime import timedelta
+from typing import ClassVar
 
 import pytest
 
@@ -251,3 +252,61 @@ class TestBackupHealth:
 
         assert report.ok
         assert named(report, "backup.verified").ok is True
+
+
+class TestDeadlineCuts:
+    """A cycle its deadline cut short finishes cleanly, so only this check sees it."""
+
+    CUT: ClassVar[dict[str, int | bool]] = {
+        "probed": 15000,
+        "targets": 16352,
+        "truncated": True,
+        "deadline_exceeded": True,
+    }
+
+    def test_a_cycle_cut_by_its_deadline_is_caught(self, corpus):
+        """The 2026-09-08 cycle: 1,352 servers unobserved, every other check green."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats=self.CUT)
+
+        report = check_corpus(corpus)
+
+        assert [c.name for c in report.failures] == ["runs.no_deadline_exceeded"]
+        assert "(15000/16352)" in named(report, "runs.no_deadline_exceeded").detail
+
+    def test_a_deliberately_limited_run_is_not_flagged(self, corpus):
+        """A staged rollout with --limit is truncated on purpose and loses nothing."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 300, "targets": 300, "truncated": True})
+
+        assert check_corpus(corpus).ok
+
+    def test_the_next_days_check_still_sees_a_cut(self, corpus):
+        """However late a cut cycle finished, one daily check must see it."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", ago_hours=26, stats=self.CUT)
+        finished_run(corpus, "manifest", stats={"probed": 16883})
+
+        report = check_corpus(corpus)
+
+        assert [c.name for c in report.failures] == ["runs.no_deadline_exceeded"]
+
+    def test_an_old_cut_clears_on_its_own(self, corpus):
+        """An alarm that never clears is an alarm nobody reads."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", ago_hours=48, stats=self.CUT)
+        finished_run(corpus, "manifest", stats={"probed": 16883})
+
+        assert check_corpus(corpus).ok
+
+    def test_a_sandbox_cut_is_caught_too(self, corpus):
+        """The sandbox counts members rather than targets; a cut is a cut."""
+        finished_run(corpus, "registry", stats={"servers_seen": 1})
+        finished_run(corpus, "manifest", stats={"probed": 1})
+        finished_run(
+            corpus, "sandbox", stats={"members": 400, "probed": 230, "deadline_exceeded": True}
+        )
+
+        report = check_corpus(corpus)
+
+        assert "(230/400)" in named(report, "runs.no_deadline_exceeded").detail

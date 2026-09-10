@@ -85,11 +85,23 @@ DEFAULT_TIMEOUT = 20.0
 DEFAULT_PER_HOST_DELAY = 0.5
 """Pause after finishing with a host, while still holding its slot."""
 
-DEFAULT_DEADLINE_SECONDS = 10800.0
-"""Hard ceiling on one cycle (3h), below the systemd unit's own timeout.
+DEFAULT_DEADLINE_SECONDS = 28800.0
+"""Hard ceiling on one cycle (8h), below the systemd unit's own timeout.
 
 Our deadline must fire first so the run closes itself and keeps what it
 collected, rather than being SIGTERMed mid-write by the service manager.
+``tests/test_units.py`` holds the two together.
+
+Sized from measurement, not from the schedule. A normal cycle takes ~70 min at
+18k targets. On 2026-09-07/08 probe p95 latency went from 2.1s to 8.8s with no
+change on our side; the cycles ran 164 and 180 min, and the second hit the old
+3h ceiling with 1,352 servers never probed — a day of Layer-2 data that cannot
+be recollected. The ceiling exists to stop a cycle overrunning the next one,
+which starts 24h later, not to keep it short. At that slow day's rate 18k
+targets need ~3.6h, so 8h is headroom for a slow day on a growing population,
+and staying under 12h means a live cycle never looks dead to
+``runs.no_stale_open``. If ``busiest_host_targets`` keeps climbing, that one
+host becomes the critical path and needs attention before this ceiling does.
 """
 
 DEFAULT_RESOLVER_WORKERS = 64

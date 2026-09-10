@@ -16,10 +16,14 @@ Environment=MCPWATCH_CORPUS=%h/mcpwatch-corpus
 Environment=MCPWATCH_CONTACT=mcpwatch@iyre.com
 ExecStart=%h/.local/bin/uv run python -m mcpwatch.collect.manifest --concurrency 50
 
-# A full double-probe cycle measured ~20 min. The timeout is deliberately far
-# above that: killing a cycle midway loses that day's Layer-2 data for every
-# server not yet reached, and that loss is permanent.
-TimeoutStartSec=14400
+# The collector's own deadline (8h, DEFAULT_DEADLINE_SECONDS) must fire first:
+# it closes the run and keeps what it collected, where a SIGTERM from here would
+# stop the cycle mid-write. This is the backstop, an hour above it, and
+# tests/test_units.py holds the two together. Measured cycles: ~70 min at 18k
+# targets normally, 164-180 min on 2026-09-07/08 when probe latency quadrupled.
+# Killing a cycle midway loses that day's Layer-2 data for every server not yet
+# reached, and that loss is permanent.
+TimeoutStartSec=32400
 CPUQuota=200%
 MemoryMax=2G
 Nice=10
