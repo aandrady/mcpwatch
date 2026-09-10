@@ -1,6 +1,13 @@
 [Unit]
 Description=MCPWatch corpus health check
 Documentation=https://github.com/aandrady/mcpwatch
+# Ordering only, and it is what lets this judge the night it runs for. A timer
+# at a fixed hour races any cycle that runs long: on 2026-09-07/08 the manifest
+# probe was still going at 06:00, so each check graded the previous day's run and
+# the one cycle cut short was never looked at. After= holds this start job until
+# both have finished, as the backup's own After= already does. Not Requires=: a
+# failed collector is exactly when this must still run.
+After=mcpwatch-manifest.service mcpwatch-backup.service
 
 [Service]
 Type=oneshot

@@ -2,8 +2,9 @@
 Description=Daily MCPWatch corpus health check
 
 [Timer]
-# An hour after the manifest probe is scheduled to finish, so a cycle that ran
-# long is still visible as a stale open run rather than racing the check.
+# Nominally after the night's cycle and backup. The service's After= ordering,
+# not this hour, is what guarantees it: a cycle still running at 06:00 holds the
+# check until it ends, so a long night is judged when it finishes.
 OnCalendar=*-*-* 06:00:00 UTC
 Persistent=true
 
